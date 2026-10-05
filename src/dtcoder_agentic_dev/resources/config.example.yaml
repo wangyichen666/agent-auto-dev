@@ -1,0 +1,56 @@
+# 运行目录默认跟随本配置文件目录；不在此写入 Token、Cookie 或认证 URL。
+dry_run: false
+scheduler:
+  poll_interval: 30
+  lease_seconds: 120
+  heartbeat_interval: 15
+  max_nodes_per_tick: 20
+codex:
+  binary: codex
+  extra_args: []
+  output_format: text
+  timeout: 1800
+state:
+  directory: .
+  database: state.db
+workspace:
+  mirrors: mirrors
+  workspaces: workspaces
+git:
+  binary: git
+  timeout: 300
+  author_name: DTCoder
+  author_email: dtcoder@example.invalid
+prompts:
+  directory: prompts
+code_host:
+  adapter: logging
+  token_env: ''
+pipeline:
+  adapter: disabled
+  poll_interval: 30
+notification:
+  adapter: 'null'
+  issue_comments: false
+workflow:
+  name: issue-development
+  version: '1'
+  max_retries: 2
+  retry_delay: 1
+  max_fix_loops: 3
+repositories: []
+# 配置仓库时替换空列表，例如（远端地址为公开占位符）：
+# repositories:
+#   - name: sample
+#     provider: logging
+#     project: sample/project
+#     remote: https://example.invalid/sample/project.git
+#     base_branch: main
+#     path: null
+#     labels: [agent-ready]
+#     authors: []
+#     validation_commands:
+#       - [python, -m, pytest, -q]
+#     validation_timeout: 300
+#     pipeline_enabled: false
+#     pipeline_failure_blocks: true

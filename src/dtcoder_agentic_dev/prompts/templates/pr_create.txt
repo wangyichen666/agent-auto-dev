@@ -1,0 +1,6 @@
+为 Issue #{issue_number}：{issue_title} 编写 PR 描述。
+工作区：{workspace_path}。读取需求、测试和评审产物，遵循现有仓库风格。
+只允许写入 {change_dir}/pr_body.md，不得修改业务代码或其他文件。
+必须包含四个非空 Markdown 章节：Summary、Linked Issue、Changes、Test Plan。
+Linked Issue 应引用 #{issue_number} 或 {issue_url}。测试结论必须与实际结果一致。
+路径变量按原样使用。不要执行 commit、push、merge 或 rebase；不要自行创建远端 PR。

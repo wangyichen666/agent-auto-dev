@@ -1,0 +1,9 @@
+评审 Issue #{issue_number}：{issue_title}。
+工作区：{workspace_path}。评审工作分支 {branch} 相对基础修订 {base_revision} 的变化。
+只允许生成 {review_dir}/report.md 和 {review_dir}/summary.json。
+代码实现应遵循现有仓库风格，评审不得改写业务代码。
+summary.json 必须是纯 JSON，无 Markdown 围栏、无额外文本，恰好包含以下字段：
+{{"passed": true, "round": {review_round}, "blockers": [], "majors": [], "minors": []}}
+passed 是布尔值，round 是本轮整数；问题列表元素使用字符串或对象。
+存在 blockers 必须 passed=false。report.md 必须非空。
+路径变量按原样使用。不要执行 commit、push、merge 或 rebase。

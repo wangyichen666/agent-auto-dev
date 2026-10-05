@@ -1,0 +1,6 @@
+修复 Issue #{issue_number} 上一轮评审的 Blocker。
+工作区：{workspace_path}。上一轮报告：{prior_review_dir}/report.md。
+Blocker 列表：{blockers_json}
+只允许修改修复这些 Blocker 所需的业务代码和测试；不得扩展到 Major/Minor 或无关重构。
+遵循仓库现有风格，更新或新增回归测试。验证命令数组：{validation_commands}。
+路径变量按原样使用。不要执行 commit、push、merge 或 rebase。
