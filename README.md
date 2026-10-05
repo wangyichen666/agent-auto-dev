@@ -8,8 +8,9 @@
 
 项目已实现工作流内核、默认产品步骤、SQLite、租约、命令执行、Git/worktree、Codex CLI 适配器、模板、事件、前台调度和全部 CLI 命令。
 
-本阶段提供 `LoggingCodeHostAdapter`、`DisabledPipelineAdapter`、`NullNotifier` 与内存测试存储；**没有接入真实代码托管平台、CI 服务或通知服务**。未配置能力抛出 `CapabilityNotConfigured`，不会假装 PR 创建或流水线触发成功。默认 `doctor` 因缺少平台能力和仓库而返回非零，这是诊断结果。真实使用前需在 `cli/bootstrap.py` 的产品组合根注入实现对应 Port 的适配器。
+内置 `AntCodeAdapter`、`ACIAdapter` 和 `DingTalkNotifier`，通过 code_host/pipeline/notification 的 adapter 配置在组合根装配。保留 `LoggingCodeHostAdapter`、`DisabledPipelineAdapter` 与 `NullNotifier` 的纯离线默认配置。未配置或 CLI 不支持所需远端查询/幂等能力时明确失败，不伪造外部成功。
 
+真实 CLI 的内部版本尚未在当前环境核验。使用前请核对[接入契约与运维说明](docs/operations.md)，完成 CLI 登录、项目配置和服务器幂等验证；没有提供测试环境凭据时，代码验证全部使用替身。
 `dry_run: true` 仅用于初始化、查询、配置和指定 Issue 入队演练，运行记录及模拟引用带演练标识。CLI 演练不执行 Codex、克隆、提交或推送，也不会虚构一套已成功完成的研发产物。
 
 ## 安装与从零初始化
@@ -25,7 +26,7 @@ dtcoder-agentic-dev --config ./runtime/config.yaml init
 dtcoder-agentic-dev --config ./runtime/config.yaml doctor
 ```
 
-`init` 创建配置、SQLite schema、五个模板、镜像、工作区及日志目录；重复执行保留用户修改的配置和模板。帮助命令不要求事先初始化。配置无效会输出中文错误，不显示堆栈。
+`init` 创建配置、SQLite schema、五个 Prompt 模板和十三个评论模板、镜像、工作区及日志目录；重复执行保留用户修改的配置和模板。帮助命令不要求事先初始化。配置无效会输出中文错误，不显示堆栈。
 
 默认目录：
 
@@ -34,6 +35,8 @@ dtcoder-agentic-dev --config ./runtime/config.yaml doctor
 ├── config.yaml
 ├── state.db
 ├── prompts/
+├── comments/
+├── scheduler.pid
 ├── mirrors/<repository-id>.git/
 ├── workspaces/<repository-id>/<run-id>/
 ├── locks/runs/<run-id>.lock
@@ -118,9 +121,14 @@ workflow:
   retry_delay: 1
   max_fix_loops: 3
 code_host:
-  adapter: logging  # 真实适配器需在组合根装配
+  adapter: logging  # 可设为 antcode
+  binary: antcode
+  profile: ''
+  timeout: 60
 pipeline:
-  adapter: disabled
+  adapter: disabled # 可设为 aci
+  binary: aci
+  timeout: 60
   poll_interval: 30
 notification:
   adapter: 'null'
@@ -133,6 +141,8 @@ repositories:
     base_branch: main
     labels: [agent-ready]
     authors: []
+    reviewers: []
+    remove_source_branch: false
     validation_commands:
       - [python, -m, pytest, -q]
     validation_timeout: 300
@@ -148,7 +158,7 @@ repositories:
 
 | 命令 | 行为 |
 | --- | --- |
-| `init` / `doctor` | 幂等初始化 / 离线诊断；不探测真实远端认证 |
+| `init` / `doctor` | 幂等初始化、仓库参数更新 / 只读工具、认证和远端分支诊断 |
 | `run` / `run-once` | 前台循环 / 一个调度周期 |
 | `process --repo sample --issue 123` | 显式新建并执行一个周期；演练仅入队 |
 | `list [--all] [--repo sample]` | 默认展示活动运行；`--all` 包含历史记录 |
@@ -157,6 +167,9 @@ repositories:
 | `cancel --run ID` | 取消并保留现场，不强制杀死正在执行的步骤 |
 | `retry --run ID` | 终止运行的新一轮执行，旧记录不删除 |
 | `cleanup --run ID` | 只清理该运行工作区，拒绝活动状态和有效租约 |
+| `start` / `status` / `stop` / `restart` / `logs` | POSIX 后台进程、身份校验、优雅停止和日志跟随 |
+| `rollback --run ID --step STEP --reason TEXT` | 展示计划，`--yes` 后创建后继，保留旧历史和备份引用 |
+| `rollback-recover --run ID --reason TEXT --yes` | 显式恢复中断的回退意图与已记录后继 |
 | `config show` | 展示配置，隐藏额外命令参数和验证命令中的潜在凭据 |
 
 Poller 不会自动重复处理已经终止的 Issue，重跑必须显式 `process` 或 `retry`。SIGINT/SIGTERM 停止新任务领取并等待当前原子步骤完成。单个运行或单个仓库出错不会终止整个调度器。`run-once` 遇到运行失败或仓库轮询失败返回非零。
@@ -173,7 +186,7 @@ schema 版本为 1，启动自动创建表，未来版本必须通过显式升�
 
 每个运行拥有唯一工作区和稳定分支；requested_branch 作为分支前缀，末尾添加完整 run_id，避免重跑冲突。基础分支在创建前 fetch，评审基准固定为创建时的修订；恢复不改变已保存基准。可选本地 `path` 只用于镜像初次克隆的源，随后将 origin 指向配置的 `remote`，确保同步与推送面向正确远端。
 
-幂等记录先于远端调用保存。PR 在重执行时先用同键查询远端，已经存在则对账；流水线 `trigger` 和评论方法必须在远端按键去重，才能关闭“远端成功、本地还没保存”的崩溃窗口。**仅靠 SQLite 唯一键无法保证跨系统恰好一次**；自定义适配器必须落实这个契约。
+幂等记录先于远端调用保存。PR 在重执行时先用同键查询远端，已经存在则对账；流水线 `trigger` 必须在远端按键去重；AntCode 评论使用标记查询与同机键锁对账。服务器提供原子去重才可完全关闭“远端成功、本地还没保存”的崩溃窗口。**仅靠 SQLite 唯一键无法保证跨系统恰好一次**；自定义适配器必须落实这个契约。内置 ACI 要求按键查询并要求服务端去重；AntCode 标记方案仍受远端一致性约束，详细边界见运维文档。
 
 ## 扩展适配器或第二个产品
 
@@ -191,6 +204,9 @@ ruff check src tests
 ruff format --check src tests
 dtcoder-agentic-dev --help
 dtcoder-agentic-dev init --help
+dtcoder-agentic-dev doctor --help
+dtcoder-agentic-dev rollback --help
+python -m build
 ```
 
 测试通过 autouse 防护拒绝真实网络、真实 Codex 和 Git commit/push/merge/rebase。默认步骤完整链路使用文件产物、SQLite 和测试替身。Git 提交/推送只验证参数数组；真实 worktree 使用 Git 2.42+ 的 orphan 功能，无需创建提交。旧 Git 会跳过这一项，可设置 `DTCODER_TEST_GIT=/path/to/new/git pytest -q` 完整验证；产品常规有提交仓库的 worktree 不依赖 orphan。
@@ -204,4 +220,8 @@ dtcoder-agentic-dev init --help
 - 同步事件投递不含持久化 outbox 重发器；失败被审计，进程在提交后、投递前崩溃可能漏发通知，主工作流仍可恢复。
 - Prompt 明确限制文件范围；这是行为约束，不是操作系统权限沙箱。真实运行需使用受控凭据与受管 worktree。
 - 不实现 Web 后台、队列、Kubernetes、多租户、迁移兼容或生产部署。
-- 下一阶段优先接入一个真实 CodeHost 与 CI 适配器，并对远端幂等、认证及流水线取消做契约测试，然后增加事件重发和多进程故障注入测试。
+- AntCode/ACI 内部 CLI 的具体部署版本、认证与服务器原子幂等仍需在真实测试环境做契约核验；CLI 没有完整查询或按键契约时明确拒绝外部创建。
+- 钉钉 direct 模式不自动获取/刷新 access token；长期运行推荐由企业网关管理认证续期、身份映射与去重。无持久化 outbox，通知不能保证必达。
+- 后台 PID 管理与回退仅支持 POSIX 单机。回退保留原分支和历史，创建独立后继，不处理已合并 PR 或自动强推远端。
+
+真实配置、迁移、回退恢复与服务部署完整示例见 [docs/operations.md](docs/operations.md)。

@@ -4,6 +4,7 @@ import click
 
 from dtcoder_agentic_dev import __version__
 from dtcoder_agentic_dev.cli.commands.configuration import register as register_configuration
+from dtcoder_agentic_dev.cli.commands.daemon import register as register_daemon
 from dtcoder_agentic_dev.cli.commands.execution import register as register_execution
 from dtcoder_agentic_dev.cli.commands.runs import register as register_runs
 from dtcoder_agentic_dev.cli.commands.setup import register as register_setup
@@ -69,11 +70,14 @@ def app(ctx, config_path):
 def runtime_for(ctx):
     from dtcoder_agentic_dev.cli.bootstrap import build_runtime
 
-    runtime = build_runtime(ctx.obj["config_path"])
+    runtime = build_runtime(
+        ctx.obj["config_path"], console_logging=not ctx.obj.get("daemon", False)
+    )
     ctx.call_on_close(runtime.close)
     return runtime
 
 
+register_daemon(app)
 register_setup(app)
 register_execution(app)
 register_runs(app)

@@ -131,7 +131,7 @@ SQLite 开启 WAL、外键和 busy timeout；使用 `BEGIN IMMEDIATE` 与 RLock�
 
 先保存 PENDING 和 request_snapshot，再调用远端。远端成功后保存 external_id/url 与 response_snapshot。正常恢复已有流水线 ID 时只调用 get_status；首次进入必须 WAITING，让调度器释放执行周期。
 
-PENDING 但没有远端 ID 代表请求可能未发送，也可能已成功但本地未落盘。CodeHost 的 find_pull_request 必须按键查询；若存在，只对账。Pipeline 的 trigger 与 comment 创建必须提供远端同键去重，重复调用不产生重复资源；这是端口契约，而非 SQLite 可以独自保证的性质。
+PENDING 但没有远端 ID 代表请求可能未发送，也可能已成功但本地未落盘。CodeHost 的 find_pull_request 必须按键查询；若存在，只对账。Pipeline 的 trigger 必须提供远端按键去重。内置 ACI 先按键查询，再将同键交给触发接口；AntCode 评论和 PR 使用稳定正文标记查询并加同机锁。标记方案仍依赖远端读取一致性与列表完整性，不宣称跨主机原子去重；SQLite 不能独自保证这些性质。
 
 触发操作 SUCCEEDED 表示“触发请求已完成”，并不表示流水线已通过；流水线最终结果记录在运行上下文与事件中。PR URL 在成功 outcome 的 external_refs 中进入 context，并随运行保存。
 
@@ -164,3 +164,26 @@ CodexAdapter 统一构造 `binary exec [extra_args] [--json] -`，通过 stdin �
 所有测试禁止真实网络和真实 Codex。Git commit/push/merge/rebase 在测试级守卫中禁止，提交/推送只用命令 mock。真实 worktree 测试使用较新 Git 的 --orphan，不制造测试提交；较老 Git 可指定 DTCODER_TEST_GIT 或跳过此单项。
 
 后续优先：真实平台/CI/通知契约、远端幂等验证、持久化事件重发、故障注入和多进程压力测试。不实现旧 schema 迁移、旧 JSON 导入、双写、Web、队列、Kubernetes 或生产部署。
+
+
+## 新增产品外部装配
+
+AntCode/ACI 仅在 adapters 层构造命令，通过 CommandRunner 执行；JsonCLI 统一处理安全错误、banner JSON、完整列表和能力检测。PR 请求支持 reviewer 与源分支清理，流水线请求支持 commit。领域与通用引擎不导入 HTTP、平台或模板目录。
+
+EventViewBuilder 在 application 层把已提交事件、attempt、artifact、run 和 Issue 映射成统一评论/通知视图。IssueCommentHandler 先持久化评论意图，AntCode 远端查标记后创建；DingTalkNotifier 依赖该视图和可注入 HttpTransport。标准 HTTP 实现在 notification adapter 内，凭据只在请求时从命名环境变量读取，异常不保存响应和认证信息。PipelineCancellationHandler 处理取消与迟到的触发事件，失败由已有事件隔离机制审计。
+
+默认装配仍为 logging/disabled/null。dry_run 直接选择离线装配，跳过评论处理器、通知与真实 CLI，拒绝回退，不会从真实配置意外产生远端调用。daemon 进程操作位于 infrastructure，CLI 提供命令入口；所有平台调用仍使用 CommandRunner 参数数组。
+
+## 回退模型与并发边界
+
+回退是产品应用用例 RollbackService，不修改 WorkflowRunner 的 attempt 语义。目标为节点最新 attempt 的输入 SHA；必须属于原运行记录且是当前分支祖先。独立后继携带该输入上下文、rollback_from、rollback_operation 和 rollback_revision，不复制原 attempts 或外部操作键。后继使用原受管镜像在指定 SHA 建立独立 worktree。旧终止运行不变；旧暂停运行通过真实 CANCELLED 转移并记录 superseded_by，以保留活动 Issue 唯一性。
+
+流程：非阻塞执行锁 → 状态/租约/attempt/工作区/祖先/PR 校验 → 展示计划 → 用户 --yes → PENDING 回退操作 → 备份引用 → 逐项远端动作并持久化结果 → 事务创建 PAUSED 后继并终止原暂停运行 → 指定 SHA 准备工作区 → 事务入队后继、完成操作和保存事件 → 提交后评论/通知。
+
+原子操作不包在长 SQLite 事务中。PENDING 回退意图阻止原运行和后继的控制/清理，以及同 Issue 新入队；操作完成后恢复原有控制逻辑。计划 revision 与执行时 revision 一致性校验防止计划过期。与运行租约及同机非阻塞锁共同防止回退时覆盖活动执行。
+
+ExternalOperation.operation_type=rollback 保存计划、操作者、原因、前后 SHA、时间戳备份引用、逐项远端结果、后继 ID 和失败类型。部分动作可能已发生，失败不会撤销或虚构原有事实。workspace 创建失败后继仍暂停并携带目标 SHA；显式 resume 时仍使用 prepare_at。
+
+进程崩溃留下 PENDING 时，rollback-recover 取得同一锁：存在相符暂停后继且远端动作完整成功审计时恢复其 worktree 并入队；没有后继时明确记 ProcessInterrupted/FAILED，重新规划会查询实际远端状态。不存在可靠输入修订、PR 已合并或远端身份不明时拒绝推测。恢复与结果发 RunRolledBack 事件；无新增 schema 表，沿用版本 1 的 JSON payload 与操作索引。
+
+外部 CLI 协议、真实服务验证边界、认证续期和单机服务示例见 [operations.md](operations.md)。

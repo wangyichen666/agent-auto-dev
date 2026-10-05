@@ -1,4 +1,5 @@
 import logging
+import re
 from pathlib import Path
 
 
@@ -14,13 +15,20 @@ class ContextFilter(logging.Filter):
 FORMAT = "%(asctime)s %(levelname)s %(name)s run_id=%(run_id)s step=%(step)s %(message)s"
 
 
-def configure_logging(directory: str):
+def configure_logging(directory: str, *, console=True):
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger("dtcoder_agentic_dev")
     logger.setLevel(logging.INFO)
     logger.propagate = False
-    targets = {"console": None, "scheduler": directory / "scheduler.log"}
+    targets = {"scheduler": directory / "scheduler.log"}
+    if console:
+        targets["console"] = None
+    else:
+        for handler in list(logger.handlers):
+            if getattr(handler, "_dtcoder_kind", None) == "console":
+                logger.removeHandler(handler)
+                handler.close()
     # 一个进程可能打开多个配置，只保留当前状态目录的文件 handler。
     for handler in list(logger.handlers):
         if (
@@ -47,6 +55,8 @@ class RunAuditHandler:
         self.directory = Path(directory)
 
     def __call__(self, event):
+        if not re.fullmatch(r"[A-Za-z0-9_-]+", event.run_id):
+            raise ValueError("事件运行 ID 不能用于安全日志路径")
         path = self.directory / "runs" / event.run_id
         path.mkdir(parents=True, exist_ok=True)
         # LoggerAdapter 注入上下文，handler 每次关闭，避免长期运行泄漏描述符。

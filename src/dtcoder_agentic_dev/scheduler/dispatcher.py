@@ -56,6 +56,8 @@ class Dispatcher:
         self.logger = logging.getLogger(__name__)
 
     def dispatch_once(self, run_id=None):
+        if getattr(self.config, "dry_run", False):
+            return None
         run = self.store.claim_run(
             self.owner, self.clock.now(), self.config.scheduler.lease_seconds, run_id
         )

@@ -4,7 +4,7 @@ import hashlib
 import math
 import os
 import re
-from dataclasses import asdict, dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, get_args, get_origin, get_type_hints
 from urllib.parse import urlsplit
@@ -59,11 +59,16 @@ class PromptConfig:
 class CodeHostConfig:
     adapter: str = "logging"
     token_env: str = ""
+    binary: str = "antcode"
+    profile: str = ""
+    timeout: float = 60
 
 
 @dataclass
 class PipelineConfig:
     adapter: str = "disabled"
+    binary: str = "aci"
+    timeout: float = 60
     poll_interval: float = 30
 
 
@@ -71,6 +76,27 @@ class PipelineConfig:
 class NotificationConfig:
     adapter: str = "null"
     issue_comments: bool = False
+    templates_directory: str = ""
+    api_url: str = ""
+    api_mode: str = "gateway"
+    access_token_env: str = ""
+    card_template_id: str = ""
+    timeout: float = 10
+    recipients: str = "assignees"
+    receiver_ids: list[str] = field(default_factory=list)
+
+
+@dataclass
+class RepoPipelineConfig:
+    project: str = ""
+    yml_path: str | None = None
+    template_id: str | None = None
+    yaml_file: str | None = None
+    yml_global_path: str | None = None
+    branch: str | None = None
+    params: dict[str, str] = field(default_factory=dict)
+    env_file: str | None = None
+    source: str = "skill"
 
 
 @dataclass
@@ -92,6 +118,9 @@ class RepoConfig:
     path: str | None = None
     labels: list[str] = field(default_factory=list)
     authors: list[str] = field(default_factory=list)
+    reviewers: list[str] = field(default_factory=list)
+    remove_source_branch: bool = False
+    pipeline: RepoPipelineConfig = field(default_factory=RepoPipelineConfig)
     validation_commands: list[list[str]] = field(default_factory=list)
     validation_timeout: float = 300
     pipeline_enabled: bool = False
@@ -146,6 +175,13 @@ def _expand(value):
 
 def _matches(value, hint):
     origin = get_origin(hint)
+    if is_dataclass(hint):
+        return isinstance(value, hint)
+    if origin is dict:
+        key_hint, value_hint = get_args(hint)
+        return isinstance(value, dict) and all(
+            _matches(k, key_hint) and _matches(v, value_hint) for k, v in value.items()
+        )
     if origin is list:
         return isinstance(value, list) and all(_matches(v, get_args(hint)[0]) for v in value)
     if get_args(hint):
@@ -162,7 +198,10 @@ def _construct(cls, data):
     unknown = set(data) - {f.name for f in fields(cls)}
     if unknown:
         raise ConfigurationError(f"{cls.__name__} 存在未知字段：{', '.join(sorted(unknown))}")
+    data = dict(data)
     for name, value in data.items():
+        if is_dataclass(hints[name]):
+            value = data[name] = _construct(hints[name], value)
         if not _matches(value, hints[name]):
             raise ConfigurationError(f"{cls.__name__}.{name} 类型错误")
     try:
@@ -190,7 +229,7 @@ def validate_ref(value: str) -> None:
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
-    config_path = Path(path or DEFAULT_CONFIG).expanduser().resolve()
+    config_path = Path(_expand(str(path or DEFAULT_CONFIG))).resolve()
     try:
         data = yaml.safe_load(config_path.read_text(encoding="utf-8")) or {}
     except (OSError, yaml.YAMLError) as exc:
@@ -217,6 +256,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     config.workspace.mirrors = _path(config.workspace.mirrors or "mirrors", state_base)
     config.workspace.workspaces = _path(config.workspace.workspaces or "workspaces", state_base)
     config.prompts.directory = _path(config.prompts.directory or "prompts", base)
+    config.notification.templates_directory = _path(
+        config.notification.templates_directory or "comments", base
+    )
     positive = [
         (config.scheduler.poll_interval, "轮询间隔"),
         (config.scheduler.lease_seconds, "租约时长"),
@@ -224,6 +266,9 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         (config.scheduler.max_nodes_per_tick, "单次最大节点数"),
         (config.codex.timeout, "Codex 超时"),
         (config.git.timeout, "Git 超时"),
+        (config.code_host.timeout, "AntCode 超时"),
+        (config.pipeline.timeout, "ACI 超时"),
+        (config.notification.timeout, "通知超时"),
         (config.pipeline.poll_interval, "流水线轮询间隔"),
     ]
     for value, name in positive:
@@ -251,6 +296,25 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     ):
         if not re.fullmatch(r"[A-Za-z0-9_-]+", adapter_name):
             raise ConfigurationError("适配器名称必须是非空标识符")
+    if not config.code_host.binary.strip() or not config.pipeline.binary.strip():
+        raise ConfigurationError("平台 CLI binary 不能为空")
+    if config.notification.recipients not in {"assignees", "configured", "both"}:
+        raise ConfigurationError("通知接收人策略必须是 assignees、configured 或 both")
+    if config.notification.api_mode not in {"gateway", "direct"}:
+        raise ConfigurationError("钉钉 api_mode 必须是 gateway 或 direct")
+    if config.notification.access_token_env and not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*", config.notification.access_token_env
+    ):
+        raise ConfigurationError("钉钉 access_token_env 必须是环境变量名")
+    if config.notification.adapter == "dingtalk":
+        validate_url(config.notification.api_url)
+        if config.notification.api_mode == "direct" and not config.notification.access_token_env:
+            raise ConfigurationError("钉钉 direct 模式需要 access_token_env；认证值不得写入配置")
+        if (
+            not config.notification.api_url.startswith("https://")
+            or not config.notification.card_template_id.strip()
+        ):
+            raise ConfigurationError("钉钉通知需要 HTTPS API URL 和卡片模板 ID")
     identities = set()
     names = set()
     for repo in config.repositories:
@@ -262,8 +326,11 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         ):
             raise ConfigurationError("仓库名称、provider 和 remote 不能为空且 remote 不能以 - 开头")
         parsed = urlsplit(repo.remote)
-        if parsed.scheme in {"http", "https"} and (
-            parsed.username or parsed.password or parsed.query
+        if (
+            parsed.password
+            or parsed.query
+            or parsed.fragment
+            or (parsed.scheme in {"http", "https"} and parsed.username)
         ):
             raise ConfigurationError("remote 不能包含认证信息或查询参数，请使用外部凭证管理")
         validate_ref(repo.base_branch)
@@ -273,12 +340,63 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         names.add(repo.name)
         if repo.path:
             repo.path = _path(repo.path, base)
+            source = Path(repo.path)
+            for managed in (Path(config.workspace.workspaces), Path(config.workspace.mirrors)):
+                if source.is_relative_to(managed) or managed.is_relative_to(source):
+                    raise ConfigurationError("本地源仓库不得与受管镜像或工作区目录重叠")
             if not Path(repo.path).is_dir():
                 raise ConfigurationError(f"仓库路径不存在：{repo.path}")
         if not math.isfinite(repo.validation_timeout) or repo.validation_timeout <= 0:
             raise ConfigurationError("验证命令超时必须大于 0")
         if any(not command or not command[0] for command in repo.validation_commands):
             raise ConfigurationError("验证命令必须是非空参数数组")
+        repo.reviewers = list(dict.fromkeys(v.strip() for v in repo.reviewers if v.strip()))
+        ci = repo.pipeline
+        for name in ("yaml_file", "env_file", "yml_global_path"):
+            value = getattr(ci, name)
+            if value:
+                setattr(ci, name, _path(value, base))
+        if repo.pipeline_enabled and config.pipeline.adapter == "aci":
+            if (
+                not ci.project.strip()
+                or sum(bool(v) for v in (ci.yml_path, ci.template_id, ci.yaml_file)) != 1
+            ):
+                raise ConfigurationError(
+                    "ACI 必须配置 project，且 yml_path/template_id/yaml_file 恰好一种"
+                )
+            if any(
+                v is not None and not v.strip()
+                for v in (
+                    ci.yml_path,
+                    ci.template_id,
+                    ci.yaml_file,
+                    ci.yml_global_path,
+                    ci.env_file,
+                    ci.branch,
+                )
+            ):
+                raise ConfigurationError("ACI 可选参数不得是空字符串")
+            if ci.project.startswith("-"):
+                raise ConfigurationError("ACI project 无效")
+            if ci.branch:
+                validate_ref(ci.branch)
+            if not ci.source.strip() or any(
+                not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", k) for k in ci.params
+            ):
+                raise ConfigurationError("ACI source 或参数名称无效")
+            for value in ci.params.values():
+                if "\x00" in value or "\n" in value:
+                    raise ConfigurationError("ACI 参数值不能包含控制字符")
+            if ci.yml_path and (Path(ci.yml_path).is_absolute() or ".." in Path(ci.yml_path).parts):
+                raise ConfigurationError("ACI yml_path 必须位于仓库内")
+            for name in ("yaml_file", "env_file", "yml_global_path"):
+                value = getattr(ci, name)
+                if value:
+                    setattr(ci, name, _path(value, base))
+                    if not Path(getattr(ci, name)).is_file():
+                        raise ConfigurationError(f"ACI {name} 文件不存在")
+        if config.code_host.adapter == "antcode" and not repo.project.strip():
+            raise ConfigurationError("AntCode 仓库必须配置 project")
         if repo.pipeline_enabled and config.pipeline.adapter == "disabled" and not config.dry_run:
             raise ConfigurationError("仓库启用了流水线，但流水线能力未配置")
     return config
@@ -290,4 +408,14 @@ def redacted_config(config: AppConfig) -> dict[str, Any]:
     data["codex"]["extra_args"] = ["<已隐藏>"] if config.codex.extra_args else []
     for repo in data["repositories"]:
         repo["validation_commands"] = ["<已隐藏>"] if repo["validation_commands"] else []
+    data["notification"]["api_url"] = "<已隐藏>" if config.notification.api_url else ""
+    data["code_host"]["profile"] = "<已隐藏>" if config.code_host.profile else ""
+    for repo in data["repositories"]:
+        repo["pipeline"]["params"] = {k: "<已隐藏>" for k in repo["pipeline"]["params"]}
     return data
+
+
+def validate_url(value: str) -> None:
+    parts = urlsplit(value)
+    if parts.username or parts.password or parts.query or parts.fragment or not parts.hostname:
+        raise ConfigurationError("URL 不得包含认证信息、查询参数或片段")

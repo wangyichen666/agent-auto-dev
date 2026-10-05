@@ -16,3 +16,4 @@ class Diagnostic:
     component: str
     ok: bool
     detail: str
+    status: str = ""

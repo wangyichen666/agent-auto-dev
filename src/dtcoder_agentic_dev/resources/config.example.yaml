@@ -1,4 +1,5 @@
-# 运行目录默认跟随本配置文件目录；不在此写入 Token、Cookie 或认证 URL。
+# 默认离线。相对配置/模板路径以本文件目录为基准；状态子路径以 state.directory 为基准。
+# 认证交由 CLI 登录或环境变量管理，禁止写入认证值或带凭据 URL。
 dry_run: false
 scheduler:
   poll_interval: 30
@@ -24,14 +25,27 @@ git:
 prompts:
   directory: prompts
 code_host:
-  adapter: logging
-  token_env: ''
+  adapter: logging # 启用真实托管时设为 antcode
+  binary: antcode
+  profile: ''
+  timeout: 60
+  token_env: '' # 保留兼容字段；AntCode 认证通过 CLI 登录完成
 pipeline:
-  adapter: disabled
+  adapter: disabled # 启用真实 CI 时设为 aci
+  binary: aci
+  timeout: 60
   poll_interval: 30
 notification:
-  adapter: 'null'
+  adapter: 'null' # 启用钉钉时设为 dingtalk
   issue_comments: false
+  templates_directory: comments
+  api_url: '' # HTTPS 卡片网关，或钉钉 createAndDeliver API
+  api_mode: gateway # gateway 或 direct，详见 docs/operations.md
+  access_token_env: '' # 仅环境变量名；direct 模式必填，令牌值不得写入 YAML
+  card_template_id: ''
+  timeout: 10
+  recipients: assignees # assignees / configured / both
+  receiver_ids: []
 workflow:
   name: issue-development
   version: '1'
@@ -39,18 +53,31 @@ workflow:
   retry_delay: 1
   max_fix_loops: 3
 repositories: []
-# 配置仓库时替换空列表，例如（远端地址为公开占位符）：
+# 启用真实适配器后可将 repositories 替换为以下列表（替换占位 URL 和项目 ID）：
 # repositories:
 #   - name: sample
-#     provider: logging
+#     provider: antcode
 #     project: sample/project
 #     remote: https://example.invalid/sample/project.git
 #     base_branch: main
-#     path: null
+#     path: null # 只作为镜像源，不得与受管目录重叠
 #     labels: [agent-ready]
 #     authors: []
+#     reviewers: [] # 平台 ID 或登录名，不能填写展示名称
+#     remove_source_branch: false
 #     validation_commands:
 #       - [python, -m, pytest, -q]
 #     validation_timeout: 300
-#     pipeline_enabled: false
+#     pipeline_enabled: true
 #     pipeline_failure_blocks: true
+#     pipeline:
+#       project: '200100125'
+#       yml_path: .aci.yml # 与 template_id / yaml_file 恰好选择一种
+#       template_id: null
+#       yaml_file: null
+#       yml_global_path: null
+#       branch: null
+#       params:
+#         env: pre
+#       env_file: null
+#       source: skill

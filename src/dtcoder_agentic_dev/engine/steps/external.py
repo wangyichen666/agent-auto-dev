@@ -11,9 +11,10 @@ from dtcoder_agentic_dev.ports.pipeline import PipelineStatus
 class PipelineStep:
     name = "pipeline"
 
-    def __init__(self, pipeline, repository, ids, poll_interval=30):
+    def __init__(self, pipeline, repository, ids, poll_interval=30, git=None):
         self.pipeline, self.repository, self.ids = pipeline, repository, ids
         self.poll_interval = poll_interval
+        self.git = git
 
     def execute(self, request, services):
         key = f"{request.run.run_id}:pipeline"
@@ -34,8 +35,15 @@ class PipelineStep:
             )
             self.repository.save_operation(op)
         if op.external_id is None:
+            if self.git:
+                self.git.push(request.workspace, request.run.branch)
             # trigger 的 Port 契约要求远端同键去重，以恢复 PENDING 意图。
-            result = self.pipeline.trigger(request.run.repository_id, request.run.branch, key)
+            kwargs = {"commit": self.git.head_sha(request.workspace)} if self.git else {}
+            result = self.pipeline.trigger(
+                request.run.repository_id, request.run.branch, key, **kwargs
+            )
+            if not isinstance(result.status, PipelineStatus):
+                raise TechnicalError("流水线返回未知状态，拒绝判定成功")
             if not result.external_id:
                 raise TechnicalError("流水线触发没有返回 external_id")
             op.external_id, op.external_url = result.external_id, result.url
@@ -45,6 +53,8 @@ class PipelineStep:
             self.repository.save_operation(op)
         else:
             result = self.pipeline.get_status(request.run.repository_id, op.external_id)
+            if not isinstance(result.status, PipelineStatus):
+                raise TechnicalError("流水线返回未知状态，拒绝判定成功")
             op.response_snapshot = {"status": result.status.value}
             op.updated_at = services.clock.now()
             self.repository.save_operation(op)
@@ -111,6 +121,21 @@ class CreatePRStep(PromptStep):
                     "base_branch": request.run.base_branch,
                     "title": request.issue.title,
                     "body": body,
+                    "reviewers": list(
+                        dict.fromkeys(
+                            v.strip()
+                            for v in [
+                                *getattr(request.repository, "reviewers", []),
+                                *request.issue.raw.get("reviewers", []),
+                                *request.issue.assignees,
+                                request.issue.author,
+                            ]
+                            if isinstance(v, str) and v.strip()
+                        )
+                    ),
+                    "remove_source_branch": getattr(
+                        request.repository, "remove_source_branch", False
+                    ),
                 },
                 created_at=services.clock.now(),
                 updated_at=services.clock.now(),
@@ -133,6 +158,14 @@ class CreatePRStep(PromptStep):
                 title=snapshot["title"],
                 body=snapshot["body"],
                 idempotency_key=key,
+                **(
+                    {
+                        "reviewers": snapshot["reviewers"],
+                        "remove_source_branch": snapshot["remove_source_branch"],
+                    }
+                    if snapshot.get("reviewers") or snapshot.get("remove_source_branch")
+                    else {}
+                ),
             )
         if not pr.external_id or not pr.url:
             raise TechnicalError("PR 返回结果缺少身份或 URL")

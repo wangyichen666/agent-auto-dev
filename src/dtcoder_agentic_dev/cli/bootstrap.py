@@ -3,13 +3,18 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from dtcoder_agentic_dev.adapters.code_host.antcode import AntCodeAdapter
 from dtcoder_agentic_dev.adapters.code_host.logging import LoggingCodeHostAdapter
 from dtcoder_agentic_dev.adapters.codex.adapter import CodexAdapter
+from dtcoder_agentic_dev.adapters.notification.dingtalk import DingTalkNotifier
 from dtcoder_agentic_dev.adapters.notification.null import NullNotifier
 from dtcoder_agentic_dev.adapters.persistence.sqlite import SQLiteRunRepository
+from dtcoder_agentic_dev.adapters.pipeline.aci import ACIAdapter
 from dtcoder_agentic_dev.adapters.pipeline.disabled import DisabledPipelineAdapter
 from dtcoder_agentic_dev.application.services.comments import IssueCommentHandler
+from dtcoder_agentic_dev.application.services.event_views import EventViewBuilder
 from dtcoder_agentic_dev.application.services.events import EventDispatcher
+from dtcoder_agentic_dev.application.services.pipeline_control import PipelineCancellationHandler
 from dtcoder_agentic_dev.application.services.runs import RunService
 from dtcoder_agentic_dev.application.workflows import issue_development_workflow
 from dtcoder_agentic_dev.config import load_config
@@ -73,29 +78,67 @@ def build_runtime(
     store=None,
     workspace=None,
     git=None,
+    console_logging=True,
 ):
     config = load_config(config_path)
     for injected, name, built_in in [
-        (code_host, config.code_host.adapter, "logging"),
-        (pipeline, config.pipeline.adapter, "disabled"),
-        (notifier, config.notification.adapter, "null"),
+        (code_host, config.code_host.adapter, {"logging", "antcode"}),
+        (pipeline, config.pipeline.adapter, {"disabled", "aci"}),
+        (notifier, config.notification.adapter, {"null", "dingtalk"}),
     ]:
-        if injected is None and name != built_in:
+        if injected is None and name not in built_in and not config.dry_run:
             raise CapabilityNotConfigured(f"适配器 {name} 尚未装配，请在产品组合根注入对应 Port")
     clock, sleeper, ids = clock or SystemClock(), sleeper or SystemSleeper(), ids or UUIDGenerator()
     commands = commands or SubprocessCommandRunner()
     logs = Path(config.state.directory) / "logs"
-    configure_logging(str(logs))
+    configure_logging(str(logs), console=console_logging)
     store = store or SQLiteRunRepository(config.state.database)
     git = git or GitClient(commands, config.git)
     workspace = workspace or GitWorktreeWorkspaceManager(git, config.workspace)
-    host = code_host or LoggingCodeHostAdapter(config.dry_run)
-    notifier = notifier or NullNotifier()
-    pipeline = pipeline or DisabledPipelineAdapter()
+    views = EventViewBuilder(store, config.notification.templates_directory)
+    host = (
+        LoggingCodeHostAdapter(True)
+        if config.dry_run
+        else code_host
+        or (
+            AntCodeAdapter(
+                config.code_host,
+                config.repositories,
+                commands,
+                Path(config.state.directory) / "locks/external",
+            )
+            if config.code_host.adapter == "antcode"
+            else LoggingCodeHostAdapter()
+        )
+    )
+    notifier = (
+        NullNotifier()
+        if config.dry_run
+        else notifier
+        or (
+            DingTalkNotifier(config.notification, views)
+            if config.notification.adapter == "dingtalk"
+            else NullNotifier()
+        )
+    )
+    pipeline = (
+        DisabledPipelineAdapter()
+        if config.dry_run
+        else pipeline
+        or (
+            ACIAdapter(config.pipeline, config.repositories, commands)
+            if config.pipeline.adapter == "aci"
+            else DisabledPipelineAdapter()
+        )
+    )
     executor = agent_executor or CodexAdapter(config.codex, commands, str(logs / "runs"))
-    handlers = [notifier.notify, RunAuditHandler(logs)]
-    if config.notification.issue_comments:
-        handlers.append(IssueCommentHandler(host, store, clock, ids))
+    handlers = [
+        notifier.notify,
+        RunAuditHandler(logs),
+        PipelineCancellationHandler(store, pipeline),
+    ]
+    if config.notification.issue_comments and not config.dry_run:
+        handlers.append(IssueCommentHandler(host, store, clock, ids, views))
     events = EventDispatcher(store, clock, ids, handlers)
     renderer = StrictPromptRenderer(config.prompts.directory)
     registry = StepRegistry()
@@ -104,7 +147,7 @@ def build_runtime(
         CodingStep(renderer, git, commands),
         ReviewStep(renderer, git),
         FixStep(renderer, git, commands, config.workflow.max_fix_loops),
-        PipelineStep(pipeline, store, ids, config.pipeline.poll_interval),
+        PipelineStep(pipeline, store, ids, config.pipeline.poll_interval, git),
         CreatePRStep(renderer, git, host, store, ids),
     ):
         registry.register(step)
@@ -123,7 +166,9 @@ def build_runtime(
         stop_requested=lambda: scheduler.stopping,
     )
     guard = RunExecutionGuard(Path(config.state.directory) / "locks/runs")
-    runs = RunService(store, config, host, workspace, events, clock, ids, guard)
+    runs = RunService(
+        store, config, host, workspace, events, clock, ids, guard, pipeline=pipeline, git=git
+    )
     dispatcher = Dispatcher(
         store, config, workspace, engine, events, clock, ids.new(), execution_guard=guard
     )

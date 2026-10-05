@@ -6,6 +6,7 @@ from typing import Any
 
 
 class EventType(str, Enum):
+    RUN_ROLLED_BACK = "RunRolledBack"
     RUN_QUEUED = "RunQueued"
     RUN_STARTED = "RunStarted"
     STEP_STARTED = "StepStarted"

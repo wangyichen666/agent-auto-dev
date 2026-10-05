@@ -128,3 +128,21 @@ class GitClient:
     def resolve_base(self, mirror, base):
         validate_ref(base)
         return self._run(mirror, "rev-parse", f"refs/remotes/origin/{base}").stdout.strip()
+
+    def backup_ref(self, path, reference, revision):
+        validate_ref(reference)
+        self._run(path, "update-ref", reference, revision, "0" * len(revision))
+
+    def is_ancestor(self, path, revision):
+        import re
+
+        if not re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", revision):
+            raise TechnicalError("回退修订必须是已记录的完整 Git SHA")
+        return (
+            self._run(path, "merge-base", "--is-ancestor", revision, "HEAD", check=False).returncode
+            == 0
+        )
+
+    def add_worktree_at(self, mirror, path, branch, revision):
+        validate_ref(branch)
+        self._run(mirror, "worktree", "add", "-b", branch, "--", str(path), revision)

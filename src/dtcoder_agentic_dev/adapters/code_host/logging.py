@@ -33,7 +33,16 @@ class LoggingCodeHostAdapter:
         return f"dry-run:{idempotency_key}"
 
     def create_pull_request(
-        self, repository_id, *, branch, base_branch, title, body, idempotency_key
+        self,
+        repository_id,
+        *,
+        branch,
+        base_branch,
+        title,
+        body,
+        idempotency_key,
+        reviewers=(),
+        remove_source_branch=False,
     ):
         self._require()
         key = (repository_id, idempotency_key)

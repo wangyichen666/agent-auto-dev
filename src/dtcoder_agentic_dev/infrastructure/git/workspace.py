@@ -15,9 +15,19 @@ class GitWorktreeWorkspaceManager:
                 raise FatalError("运行或仓库 ID 不能用于安全的工作区路径")
         mirror = Path(self.config.mirrors).resolve() / f"{run.repository_id}.git"
         workspace = Path(self.config.workspaces).resolve() / run.repository_id / run.run_id
+        mirror_root, workspace_root = (
+            Path(self.config.mirrors).resolve(),
+            Path(self.config.workspaces).resolve(),
+        )
+        if not mirror.resolve().is_relative_to(
+            mirror_root
+        ) or not workspace.resolve().is_relative_to(workspace_root):
+            raise FatalError("受管工作区或镜像存在路径逃逸")
         return mirror, workspace
 
     def prepare(self, run, repository):
+        if run.context.get("rollback_revision"):
+            return self.prepare_at(run, repository, run.context["rollback_revision"])
         mirror, workspace = self._paths(run)
         with file_lock(mirror.parent / f"{run.repository_id}.lock"):
             if not self.git.is_repository(mirror):
@@ -59,3 +69,21 @@ class GitWorktreeWorkspaceManager:
             if workspace.exists():
                 self._recover(run, workspace)
                 self.git.remove_worktree(mirror, workspace)
+
+    def prepare_at(self, run, repository, revision):
+        mirror, workspace = self._paths(run)
+        with file_lock(mirror.parent / f"{run.repository_id}.lock"):
+            if not self.git.is_repository(mirror):
+                raise FatalError("回退需要已有受管镜像")
+            if workspace.exists():
+                return self._recover(run, workspace)
+            workspace.parent.mkdir(parents=True, exist_ok=True)
+            if self.git.branch_exists(mirror, run.branch):
+                self.git.add_worktree(mirror, workspace, run.branch, run.base_branch)
+                if self.git.head_sha(workspace) != revision and not self.git.is_ancestor(
+                    workspace, revision
+                ):
+                    raise FatalError("已存在后继分支与目标修订不一致")
+            else:
+                self.git.add_worktree_at(mirror, workspace, run.branch, revision)
+            return str(workspace)

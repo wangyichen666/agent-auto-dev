@@ -311,7 +311,15 @@ class WorkflowRunner:
                     )
                 for name in outcome.facts.get("events", []):
                     pending.append(
-                        self._event(EventType(name), latest, node.name, outcome.external_refs)
+                        self._event(
+                            EventType(name),
+                            latest,
+                            node.name,
+                            {
+                                **outcome.external_refs,
+                                **{k: v for k, v in outcome.facts.items() if k != "events"},
+                            },
+                        )
                     )
                 if latest.status is RunStatus.SUCCEEDED:
                     pending.append(self._event(EventType.RUN_SUCCEEDED, latest))

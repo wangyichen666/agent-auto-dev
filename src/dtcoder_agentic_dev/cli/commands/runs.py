@@ -80,3 +80,63 @@ def register(app):
         ("cleanup", "清理已终止运行的隔离工作区。"),
     ]:
         add_control(name, text)
+
+    @app.command("rollback")
+    @click.option("--run", "run_id", required=True, help="原运行 ID。")
+    @click.option(
+        "--step",
+        required=True,
+        type=click.Choice(["requirements", "coding", "review", "fix", "pipeline", "create_pr"]),
+    )
+    @click.option("--reason", required=True, help="回退原因，写入审计。")
+    @click.option("--dry-run", "plan_only", is_flag=True, help="只展示计划。")
+    @click.option("--yes", is_flag=True, help="确认执行已展示的回退计划。")
+    @click.option("--keep-pr", is_flag=True, help="保留未合并 PR。")
+    @click.option("--keep-pipeline", is_flag=True, help="保留运行中的流水线。")
+    @click.option("--no-backup", is_flag=True, help="关闭备份，需要再次显式确认。")
+    @click.option("--confirm-no-backup", is_flag=True, help="再次确认不创建备份。")
+    @click.pass_context
+    def rollback_command(
+        ctx,
+        run_id,
+        step,
+        reason,
+        plan_only,
+        yes,
+        keep_pr,
+        keep_pipeline,
+        no_backup,
+        confirm_no_backup,
+    ):
+        """从节点输入修订创建后继运行，保留原尝试和审计。"""
+        from dtcoder_agentic_dev.application.services.rollback import RollbackService
+        from dtcoder_agentic_dev.cli.app import runtime_for
+
+        service = RollbackService(runtime_for(ctx).runs)
+        options = dict(keep_pr=keep_pr, keep_pipeline=keep_pipeline, backup=not no_backup)
+        plan = service.plan(run_id, step, reason, **options)
+        click.echo(json.dumps(plan, ensure_ascii=False, indent=2))
+        if plan_only or not yes:
+            click.echo("仅展示计划；执行需要 --yes。")
+            return
+        if no_backup and not confirm_no_backup:
+            raise click.ClickException("关闭备份还需要 --confirm-no-backup")
+        result = service.execute(
+            run_id, step, reason, expected_revision=plan["source_revision"], **options
+        )
+        click.echo(f"已创建后继运行：{result.run_id}")
+
+    @app.command("rollback-recover")
+    @click.option("--run", "run_id", required=True)
+    @click.option("--reason", required=True)
+    @click.option("--yes", is_flag=True, help="确认恢复中断的回退审计。")
+    @click.pass_context
+    def rollback_recover(ctx, run_id, reason, yes):
+        """恢复 PENDING 回退；存在后继时准备原目标工作区，否则记录中断。"""
+        from dtcoder_agentic_dev.application.services.rollback import RollbackService
+        from dtcoder_agentic_dev.cli.app import runtime_for
+
+        if not yes:
+            raise click.ClickException("恢复回退需要 --yes；先使用 show 检查 PENDING 操作")
+        operation = RollbackService(runtime_for(ctx).runs).recover(run_id, reason)
+        click.echo(f"回退审计 {operation.operation_id}：{operation.status.value}")

@@ -3,11 +3,13 @@ import click
 
 def register(app):
     @app.command("run")
+    @click.option("--daemon-token", hidden=True)
     @click.pass_context
-    def run_command(ctx):
+    def run_command(ctx, daemon_token):
         """前台持续轮询；SIGINT/SIGTERM 后完成当前原子步骤并退出。"""
         from dtcoder_agentic_dev.cli.app import runtime_for
 
+        ctx.obj["daemon"] = bool(daemon_token)
         runtime = runtime_for(ctx)
         if runtime.config.dry_run:
             click.echo("演练模式：请使用 run-once 查看待调度任务。")

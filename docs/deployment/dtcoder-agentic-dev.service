@@ -1,0 +1,16 @@
+# 用户级示例：按 %h/.local/share/dtcoder 的部署约定安装虚拟环境。
+[Unit]
+Description=DTCoder Issue 自动研发调度器
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/.dtcoder-agentic-dev
+ExecStart=%h/.local/share/dtcoder/.venv/bin/dtcoder-agentic-dev --config %h/.dtcoder-agentic-dev/config.yaml run
+Restart=on-failure
+RestartSec=15
+KillSignal=SIGTERM
+TimeoutStopSec=1900
+
+[Install]
+WantedBy=default.target
