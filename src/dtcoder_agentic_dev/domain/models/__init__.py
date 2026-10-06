@@ -26,6 +26,8 @@ class AttemptStatus(str, Enum):
     WAITING = "WAITING"
     SKIPPED = "SKIPPED"
     FAILED = "FAILED"
+    PAUSED = "PAUSED"
+    CANCELLED = "CANCELLED"
 
 
 class OperationStatus(str, Enum):
@@ -103,6 +105,7 @@ class StepAttempt:
     error_message: str | None = None
     artifacts: list[Artifact] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
+    error_code: str | None = None
 
 
 @dataclass

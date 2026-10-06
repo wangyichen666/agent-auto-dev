@@ -155,7 +155,7 @@ CodexAdapter 统一构造 `binary exec [extra_args] [--json] -`，通过 stdin �
 4. 注册步骤，创建该工作流版本的 WorkflowRun，使用自己的应用用例和组合根。
 5. 复用 WorkflowRunner、RunRepository、租约、事件及基础设施；无需修改或复制核心引擎。
 
-`test_second_product_without_core_modification` 展示版本 2 的文档产品，完全绕过默认研发节点仍正常完成。当前 CLI 是研发产品，因此其配置验证仅接受默认研发工作流；新产品配置与 CLI 可在自身装配中定义。
+`test_second_product_without_core_modification` 展示版本 2 的文档产品，完全绕过默认研发节点仍正常完成。原 process CLI 的产品配置仍仅接受默认研发工作流；新的 submit CLI 接受独立 YAML 定义，共用同一引擎。
 
 ## 验证策略与范围
 
@@ -163,7 +163,7 @@ CodexAdapter 统一构造 `binary exec [extra_args] [--json] -`，通过 stdin �
 
 所有测试禁止真实网络和真实 Codex。Git commit/push/merge/rebase 在测试级守卫中禁止，提交/推送只用命令 mock。真实 worktree 测试使用较新 Git 的 --orphan，不制造测试提交；较老 Git 可指定 DTCODER_TEST_GIT 或跳过此单项。
 
-后续优先：真实平台/CI/通知契约、远端幂等验证、持久化事件重发、故障注入和多进程压力测试。不实现旧 schema 迁移、旧 JSON 导入、双写、Web、队列、Kubernetes 或生产部署。
+后续优先：真实平台/CI/通知契约、远端幂等验证、持久化事件重发、故障注入和多进程压力测试。目前未实现数据库结构迁移、旧独立 JSON 导入、双写、Web、队列、Kubernetes 或生产部署；v1 payload 的新增可选字段保留兼容读取。
 
 
 ## 新增产品外部装配
@@ -187,3 +187,13 @@ ExternalOperation.operation_type=rollback 保存计划、操作者、原因、�
 进程崩溃留下 PENDING 时，rollback-recover 取得同一锁：存在相符暂停后继且远端动作完整成功审计时恢复其 worktree 并入队；没有后继时明确记 ProcessInterrupted/FAILED，重新规划会查询实际远端状态。不存在可靠输入修订、PR 已合并或远端身份不明时拒绝推测。恢复与结果发 RunRolledBack 事件；无新增 schema 表，沿用版本 1 的 JSON payload 与操作索引。
 
 外部 CLI 协议、真实服务验证边界、认证续期和单机服务示例见 [operations.md](operations.md)。
+
+## 声明式任务扩展（第一批）
+
+Application 的 `yaml_workflows` 负责严格 YAML 解析和图编译，Domain 的 declarative 模型只表达数据与标量比较。ExecutorRegistry 显式注册 agent/tool；DeclarativeStep 实现既有 WorkflowStep，通过 AgentExecutorPort、ToolExecutor、ArtifactStore 与 ExecutionJournal 执行。CLI submit 与既有 Dispatcher 共用 WorkflowRunner、事务、CAS、租约、heartbeat、文件锁和事件分发，未复制第二套调度/状态引擎。
+
+YAML run 保存原始/实际定义文件的摘要引用，恢复时只读取冻结快照。stage execution、pause/fail point、feedback 使用 v1 payload 的版本化可选记录，attempt 新增可选 error_code；旧 payload 兼容读取。日志由文件 Journal 保存，有界摘要进入状态。无仓任务使用独立受管目录及身份标记，不伪造 Git 仓库；单仓仍复用原 worktree。
+
+原 Issue 产品节点图继续兼容；本批尚未把其评审、流水线和远端语义迁移为 YAML 模板。新自然语言 submit 统一通过 YAML 编译。旧重跑创建新 run；YAML retry 保留当前 run 和全部 attempts，仅恢复失败 job。后续迁移须保持这项公开行为说明与测试。
+
+详细 schema、恢复边界、工具白名单、人工语义与后续未实现项目见 [workflows.md](workflows.md)，应用服务边界见 [api.md](api.md)。

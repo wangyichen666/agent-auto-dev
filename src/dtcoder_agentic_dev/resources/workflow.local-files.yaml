@@ -1,0 +1,29 @@
+name: local-files
+version: '1'
+description: 完全离线的文件处理示例，只演示工具执行与产物验证。
+stages: [write, verify]
+jobs:
+  write:
+    stage: write
+    type: tool
+    toolName: file.write
+    config:
+      path: report.md
+      content: |
+        # 本地工具示例
+
+        此文件由声明式 file.write 节点创建，用于验证离线任务生命周期。
+    outputs:
+      report: {path: report.md, kind: markdown}
+  verify:
+    stage: verify
+    type: tool
+    toolName: file.copy
+    inputs:
+      source: {job: write, output: report}
+    config: {source: report.md, target: verified.md}
+    outputs:
+      verified: {path: verified.md, kind: markdown}
+    artifact_check:
+      - {type: nonempty, path: verified.md}
+      - {type: sections, path: verified.md, sections: [本地工具示例]}

@@ -49,3 +49,24 @@ AntCode/ACI 内部 CLI 的真实命令版本、完整查询、登录接口和服
 钉钉直连依据官方 SDK 的卡片投放结构，但未向真实服务发送；令牌续期、用户身份映射和应用权限由外部环境/网关提供。同步事件仍没有 outbox，存在提交后、投递前崩溃的漏发边界。POSIX 单机进程与锁不代表跨主机 fencing，Windows 后台与回退未支持。
 
 迁移不改变 SQLite schema，旧配置通过新增字段默认值兼容；原路径执行 init 安装缺失评论模板，用户文件不覆盖。完整接入和运维要求见 [operations.md](operations.md)。
+
+## 2026-10-06：声明式工作流第一批
+
+初始 git status 干净；基线 209 passed、1 skipped。最终新增 82 项行为验证，总计 **291 passed、1 skipped**。唯一跳过项是系统 Apple Git 2.39.5 不支持测试所用 orphan worktree；提交、推送和模型契约仍由 fake/mock 验证。未执行真实模型请求、真实网络业务调用或用户仓库的 Git 写操作。
+
+在项目 .venv（Python 3.14）中运行并通过：
+
+- pytest -q
+- python -m compileall -q src tests
+- ruff check src tests
+- ruff format --check src tests
+- git diff --check
+- python -m build（隔离构建 wheel 与 sdist）
+- agent-auto-dev --help、doctor --help、process --help、rollback --help
+- 新增 submit --help、workflow --help
+
+新测试覆盖：严格 YAML/非法类型/重复键/大小限制、顺序与注册表、循环精确参数比较与轮数上限、六类产物校验、前后置动作失败、路径逃逸与工作区内受管路径符号链接、审批与人工产物、脱敏反馈、超时/取消竞态、优雅停止、失败节点重试、旧 payload 重开、模板冻结、单仓 Port 复用、无仓身份保护、失败日志文件与凭据脱敏、过期 snapshot writer。
+
+包内分发原有配置与两份新 YAML 模板。安装后验收使用临时目录中的 wheel 副本执行 init → workflow validate → submit local-files，并核验真实产物、双命令入口、模板资源与无 .git 工作区。仓库没有前端，因此没有前端安装、类型检查、测试或构建项。
+
+这是一批可用的 YAML/CLI 闭环，不是整个平台完成：Claude CLI/SDK 与异步运行时、session resume、handoff、多仓、reset、HTTP API、面板与自动备份/清理仍未实施。详见 [workflows.md](workflows.md)。

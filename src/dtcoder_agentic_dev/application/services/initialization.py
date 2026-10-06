@@ -86,6 +86,8 @@ def initialize(
         config.prompts.directory,
         config.notification.templates_directory,
         str(Path(config.state.directory) / "logs/runs"),
+        config.declarative.directory,
+        config.declarative.skills_directory,
     ):
         Path(directory).mkdir(parents=True, exist_ok=True)
     resource = files("dtcoder_agentic_dev.prompts").joinpath("templates")
@@ -99,6 +101,15 @@ def initialize(
     templates += [
         (Path(config.notification.templates_directory) / f"{name}.txt", text)
         for name, text in DEFAULT_TEMPLATES.items()
+    ]
+    templates += [
+        (
+            Path(config.declarative.directory) / f"{name}.yaml",
+            files("dtcoder_agentic_dev.resources")
+            .joinpath(f"workflow.{name}.yaml")
+            .read_text(encoding="utf-8"),
+        )
+        for name in ("document", "local-files")
     ]
     for destination, text in templates:
         if destination.is_symlink():

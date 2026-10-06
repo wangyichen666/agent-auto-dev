@@ -2,6 +2,7 @@ import re
 from pathlib import Path
 
 from dtcoder_agentic_dev.domain.errors import FatalError
+from dtcoder_agentic_dev.infrastructure.filesystem.workspace import LocalTaskWorkspace
 from dtcoder_agentic_dev.infrastructure.locking.file import file_lock
 
 
@@ -62,6 +63,8 @@ class GitWorktreeWorkspaceManager:
             return self._recover(run, workspace)
 
     def cleanup(self, run):
+        if run.context.get("repo_mode") == "none" and not run.repository_id:
+            return LocalTaskWorkspace(self.config.workspaces).cleanup(run)
         mirror, workspace = self._paths(run)
         if run.workspace_path and Path(run.workspace_path).resolve() != workspace:
             raise FatalError("拒绝清理非当前运行的工作区")

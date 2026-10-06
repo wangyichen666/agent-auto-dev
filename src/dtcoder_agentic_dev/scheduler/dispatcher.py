@@ -5,6 +5,7 @@ from threading import Event, Thread
 from dtcoder_agentic_dev.domain.errors import ConcurrencyConflict
 from dtcoder_agentic_dev.domain.events import EventType
 from dtcoder_agentic_dev.domain.models import TERMINAL_STATUSES, RunStatus
+from dtcoder_agentic_dev.domain.security import redact_text
 
 
 class LeaseHeartbeat:
@@ -48,11 +49,13 @@ class Dispatcher:
         owner,
         heartbeat_factory=LeaseHeartbeat,
         execution_guard=None,
+        declarative=None,
     ):
         self.store, self.config, self.workspace, self.runner = store, config, workspace, runner
         self.events, self.clock, self.owner = events, clock, owner
         self.heartbeat_factory = heartbeat_factory
         self.execution_guard = execution_guard or (lambda run_id: nullcontext())
+        self.declarative = declarative
         self.logger = logging.getLogger(__name__)
 
     def dispatch_once(self, run_id=None):
@@ -76,6 +79,29 @@ class Dispatcher:
                 self.execution_guard(run.run_id),
             ):
                 self.store.assert_lease(run.run_id, self.owner, self.clock.now())
+                if run.context.get("workflow_definition"):
+                    if self.declarative is None:
+                        raise ConcurrencyConflict("未装配 YAML 工作流，保留运行等待正确 worker")
+                    repo = next(
+                        (
+                            r
+                            for r in self.config.repositories
+                            if r.repository_id == run.repository_id
+                        ),
+                        None,
+                    )
+                    if run.repository_id and repo is None:
+                        raise ValueError("YAML 任务所需仓库配置缺失")
+                    engine = self.declarative.runner_for(run)
+                    self.declarative.prepare_workspace(run, repo, self.workspace)
+                    if heartbeat.error:
+                        raise ConcurrencyConflict("准备工作区时丢失租约")
+                    return engine.run(
+                        run.run_id,
+                        self.store.load_issue(run.repository_id, run.issue_external_id),
+                        repo,
+                        self.owner,
+                    )
                 repo = next(
                     r for r in self.config.repositories if r.repository_id == run.repository_id
                 )
@@ -116,7 +142,7 @@ class Dispatcher:
                     return latest
                 if latest.status not in TERMINAL_STATUSES and latest.status is not RunStatus.PAUSED:
                     latest.status, latest.finished_at = RunStatus.FAILED, self.clock.now()
-                    latest.last_error = f"{type(exc).__name__}：{exc}"
+                    latest.last_error = redact_text(f"{type(exc).__name__}：{exc}")
                     latest.updated_at = self.clock.now()
                     self.store.update_run(latest)
                     event = self.events.make(

@@ -9,6 +9,9 @@ class AgentExecutionRequest:
     attempt_number: int
     workspace: str
     prompt: str
+    model: str | None = None
+    timeout: float | None = None
+    allow_no_repo: bool = False
 
 
 @dataclass(frozen=True)

@@ -8,6 +8,7 @@ from dtcoder_agentic_dev.cli.commands.daemon import register as register_daemon
 from dtcoder_agentic_dev.cli.commands.execution import register as register_execution
 from dtcoder_agentic_dev.cli.commands.runs import register as register_runs
 from dtcoder_agentic_dev.cli.commands.setup import register as register_setup
+from dtcoder_agentic_dev.cli.commands.workflows import register as register_workflows
 from dtcoder_agentic_dev.config import DEFAULT_CONFIG
 from dtcoder_agentic_dev.domain.errors import AgenticDevError
 
@@ -62,7 +63,7 @@ class ChineseGroup(click.Group):
 )
 @click.pass_context
 def app(ctx, config_path):
-    """可恢复、可扩展的 Issue 自动研发工作流。"""
+    """可恢复的 Issue 研发工作流与声明式本地任务。"""
     ctx.ensure_object(dict)
     ctx.obj["config_path"] = config_path
 
@@ -82,6 +83,7 @@ register_setup(app)
 register_execution(app)
 register_runs(app)
 register_configuration(app)
+register_workflows(app)
 
 
 def _localize_commands(command):

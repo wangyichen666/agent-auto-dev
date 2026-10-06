@@ -27,7 +27,7 @@ def register(app):
                 [
                     [
                         r.run_id,
-                        names.get(r.repository_id, r.repository_id),
+                        names.get(r.repository_id, r.repository_id or "无仓"),
                         r.issue_number,
                         r.status.value,
                         r.current_step,
@@ -55,19 +55,30 @@ def register(app):
     def add_control(name, help_text):
         @click.command(name, help=help_text)
         @click.option("--run", "run_id", required=True, help="运行 ID。")
+        @click.option("--feedback", help="YAML 任务的人工反馈（持久化前脱敏）。")
+        @click.option(
+            "--mode",
+            type=click.Choice(["revise", "continue_conversation"]),
+            default="revise",
+            help="YAML 恢复方式；会话续聊尚未装配时明确拒绝。",
+        )
         @click.pass_context
-        def command(ctx, run_id):
+        def command(ctx, run_id, feedback, mode):
             from dtcoder_agentic_dev.cli.app import runtime_for
 
             runtime = runtime_for(ctx)
+            if name not in {"resume", "retry", "skip"} and (
+                feedback is not None or mode != "revise"
+            ):
+                raise click.ClickException("反馈与恢复方式只适用于 resume/retry/skip")
             if name == "retry":
-                result = runtime.runs.retry(run_id)
+                result = runtime.runs.retry(run_id, feedback=feedback, mode=mode)
             elif name == "cleanup":
                 runtime.runs.cleanup(run_id)
                 click.echo(f"已清理运行工作区：{run_id}")
                 return
             else:
-                result = runtime.runs.control(run_id, name)
+                result = runtime.runs.control(run_id, name, feedback=feedback, mode=mode)
             click.echo(f"运行 {result.run_id}：{result.status.value}")
 
         app.add_command(command)
@@ -76,8 +87,9 @@ def register(app):
         ("pause", "暂停运行，当前原子步骤完成后停止。"),
         ("resume", "恢复已暂停运行。"),
         ("cancel", "取消运行，保留现场。"),
-        ("retry", "创建新的重跑记录，保留旧记录。"),
+        ("retry", "旧 Issue 创建重跑记录；YAML 从失败节点恢复并保留历史。"),
         ("cleanup", "清理已终止运行的隔离工作区。"),
+        ("skip", "跳过已暂停且显式允许跳过的 YAML 节点。"),
     ]:
         add_control(name, text)
 

@@ -26,7 +26,7 @@ dtcoder-agentic-dev --config ./runtime/config.yaml init
 dtcoder-agentic-dev --config ./runtime/config.yaml doctor
 ```
 
-`init` 创建配置、SQLite schema、五个 Prompt 模板和十三个评论模板、镜像、工作区及日志目录；重复执行保留用户修改的配置和模板。帮助命令不要求事先初始化。配置无效会输出中文错误，不显示堆栈。
+`init` 创建配置、SQLite schema、五个 Prompt 模板、十三个评论模板和两个 YAML 工作流模板，以及镜像、工作区及日志目录；重复执行保留用户修改的配置和模板。帮助命令不要求事先初始化。配置无效会输出中文错误，不显示堆栈。
 
 默认目录：
 
@@ -176,7 +176,7 @@ Poller 不会自动重复处理已经终止的 Issue，重跑必须显式 `proce
 
 ## SQLite、恢复与幂等
 
-schema 版本为 1，启动自动创建表，未来版本必须通过显式升级入口处理；没有旧格式兼容层。记录的全量 dataclass 内容以 JSON payload 存储，索引、租约、revision、调度时间及唯一性字段使用关系列，行转换集中在 SQLite 适配器。
+schema 版本为 1，启动自动创建表。新增运行记录采用 JSON payload 可选字段扩展并兼容旧 payload；未知 schema 版本拒绝打开，结构升级需显式迁移。记录的全量 dataclass 内容以 JSON payload 存储，索引、租约、revision、调度时间及唯一性字段使用关系列，行转换集中在 SQLite 适配器。
 
 节点开始前保存 RUNNING 尝试；完成时在同一事务内先保存尝试和产物，再更新运行及领域事件。事件提交后同步投递，通知/评论错误只记录 warning 和处理器错误类型。可选 Issue 评论使用独立的幂等操作记录，不覆盖主结果。
 
@@ -219,9 +219,26 @@ python -m build
 - 默认单 worker；数据库、租约和同机执行锁支持后续多个进程，不宣称跨主机共享 SQLite 的分布式一致性。
 - 同步事件投递不含持久化 outbox 重发器；失败被审计，进程在提交后、投递前崩溃可能漏发通知，主工作流仍可恢复。
 - Prompt 明确限制文件范围；这是行为约束，不是操作系统权限沙箱。真实运行需使用受控凭据与受管 worktree。
-- 不实现 Web 后台、队列、Kubernetes、多租户、迁移兼容或生产部署。
+- 尚未实现 Web 后台、队列、Kubernetes、多租户或生产部署；当前包含 v1 JSON payload 的兼容读取，尚不支持不同数据库 schema 版本间的迁移。
 - AntCode/ACI 内部 CLI 的具体部署版本、认证与服务器原子幂等仍需在真实测试环境做契约核验；CLI 没有完整查询或按键契约时明确拒绝外部创建。
 - 钉钉 direct 模式不自动获取/刷新 access token；长期运行推荐由企业网关管理认证续期、身份映射与去重。无持久化 outbox，通知不能保证必达。
 - 后台 PID 管理与回退仅支持 POSIX 单机。回退保留原分支和历史，创建独立后继，不处理已合并 PR 或自动强推远端。
 
 真实配置、迁移、回退恢复与服务部署完整示例见 [docs/operations.md](docs/operations.md)。
+
+## 声明式 YAML 任务（第一批交付）
+
+新增 `agent-auto-dev` 兼容命令别名。可通过自然语言需求和 YAML 模板立即提交单仓或无仓任务，复用原引擎、SQLite、租约、heartbeat 和执行锁。支持 agent/tool 注册、stage/job 顺序、有限安全循环、产物规则、审批/人工产物、脱敏反馈、失败节点重试及运行快照恢复。
+
+```bash
+agent-auto-dev --config ./runtime/config.yaml init
+# 完全离线的工具示例，不调用模型：
+agent-auto-dev --config ./runtime/config.yaml submit \
+  --workflow ./runtime/workflows/local-files.yaml --task '验证文件处理流程'
+# 根据自然语言生成文档；真实调用 Codex：
+agent-auto-dev --config ./runtime/config.yaml submit --task '整理项目运维流程'
+```
+
+init 安装用户模板且保留已有副本。默认 document.yaml 的 agent 路由到 Codex；当前批次尚未接入 Claude CLI/SDK、异步取消/session resume、多仓、HTTP 服务、面板及备份服务。原 Issue 工作流、重跑/回退和外部适配器保持兼容。命令工具默认关闭，不会因为解析模板而执行外部命令。
+
+完整可用能力、YAML 格式、持久化兼容性、操作说明与具体边界见 [声明式工作流](docs/workflows.md) 和 [应用服务边界](docs/api.md)。

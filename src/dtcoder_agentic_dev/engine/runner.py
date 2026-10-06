@@ -5,6 +5,7 @@ from copy import deepcopy
 from dataclasses import asdict, replace
 from types import MappingProxyType
 from typing import Callable
+from uuid import NAMESPACE_URL, uuid5
 
 from dtcoder_agentic_dev.domain.errors import (
     BusinessError,
@@ -19,6 +20,7 @@ from dtcoder_agentic_dev.domain.models import (
     RunStatus,
     StepAttempt,
 )
+from dtcoder_agentic_dev.domain.security import redact
 from dtcoder_agentic_dev.domain.workflow import (
     OutcomeError,
     OutcomeType,
@@ -102,6 +104,7 @@ class WorkflowRunner:
                     attempt.status = AttemptStatus.FAILED
                     attempt.finished_at = self.services.clock.now()
                     attempt.error_type = "ProcessInterrupted"
+                    attempt.error_code = "PROCESS_INTERRUPTED"
                     attempt.error_message = "先前 worker 中断，执行恢复尝试"
                     self.repository.save_attempt(attempt)
             self.repository.update_run(run)
@@ -132,7 +135,9 @@ class WorkflowRunner:
                 number,
             )
             attempt = StepAttempt(
-                self.ids.new(),
+                str(uuid5(NAMESPACE_URL, f"attempt:{run_id}:{node.name}:{number}"))
+                if getattr(step, "stable_identity", False)
+                else self.ids.new(),
                 run_id,
                 node.name,
                 number,
@@ -153,6 +158,32 @@ class WorkflowRunner:
                 ):
                     return current
                 self.repository.save_attempt(attempt)
+                if hasattr(step, "stage"):
+                    round_number = step.round(request)
+                    stage_id = str(
+                        uuid5(
+                            NAMESPACE_URL,
+                            f"stage:{run_id}:{step.stage}:{getattr(step.loop, 'name', '')}:"
+                            f"{current.context.get('declarative_epoch', 0)}:{round_number}",
+                        )
+                    )
+                    attempt.metadata.update(
+                        stage_execution_id=stage_id, stage=step.stage, round=round_number
+                    )
+                    stages = current.context.setdefault("stage_executions", [])
+                    stage = next((s for s in stages if s["execution_id"] == stage_id), None)
+                    if stage is None:
+                        stage = {
+                            "execution_id": stage_id,
+                            "stage": step.stage,
+                            "round": round_number,
+                            "started_at": self.services.clock.now(),
+                        }
+                        stages.append(stage)
+                    stage["status"] = "RUNNING"
+                    stage["finished_at"] = None
+                    self.repository.update_run(current)
+                    self.repository.save_attempt(attempt)
                 event = self._event(
                     EventType.STEP_STARTED, run, node.name, {"attempt_number": number}
                 )
@@ -163,29 +194,101 @@ class WorkflowRunner:
                 snapshot = getattr(step, "input_snapshot", None)
                 if snapshot is not None:
                     attempt.input_snapshot.update(snapshot(request))
-                    self.repository.save_attempt(attempt)
+                    if getattr(step, "stable_identity", False):
+                        attempt.input_snapshot = redact(attempt.input_snapshot)
+                    with self.repository.transaction():
+                        self._lease(run, owner)
+                        self.repository.save_attempt(attempt)
                 request = replace(
                     request, input_snapshot=MappingProxyType(deepcopy(attempt.input_snapshot))
                 )
                 self._lease(run, owner)
-                outcome = step.execute(request, self.services)
+                boundary = self.repository.load_run(run_id)
+                if self.stop_requested():
+                    return boundary
+                if boundary.status is RunStatus.CANCELLED:
+                    outcome = StepOutcome(OutcomeType.CANCELLED)
+                elif boundary.status is RunStatus.PAUSED:
+                    outcome = StepOutcome(
+                        OutcomeType.PAUSED,
+                        facts={
+                            "pause_point": boundary.context.get(
+                                "pause_point", {"job": node.name, "reason": "safe_boundary"}
+                            )
+                        },
+                    )
+                else:
+                    outcome = step.execute(request, self.services)
                 if not isinstance(outcome, StepOutcome):
                     raise FatalError("步骤必须返回 StepOutcome")
             except TechnicalError as exc:
                 technical = True
                 outcome = StepOutcome(
-                    OutcomeType.FAILED, error=OutcomeError(type(exc).__name__, str(exc))
+                    OutcomeType.FAILED,
+                    error=OutcomeError(type(exc).__name__, str(exc), exc.code),
+                    facts={
+                        "execution": getattr(
+                            exc,
+                            "execution_metadata",
+                            {
+                                "stdout": getattr(exc, "stdout", ""),
+                                "stderr": getattr(exc, "stderr", ""),
+                            },
+                        )
+                    }
+                    if getattr(step, "stable_identity", False)
+                    else {},
                 )
             except BusinessError as exc:
                 outcome = StepOutcome(
-                    OutcomeType.BLOCKED, error=OutcomeError(type(exc).__name__, str(exc))
+                    OutcomeType.FAILED
+                    if getattr(step, "stable_identity", False)
+                    else OutcomeType.BLOCKED,
+                    error=OutcomeError(type(exc).__name__, str(exc), exc.code),
+                    facts={"execution": getattr(exc, "execution_metadata", {})}
+                    if getattr(step, "stable_identity", False)
+                    else {},
                 )
             except ConcurrencyConflict:
                 raise
             except Exception as exc:
                 outcome = StepOutcome(
-                    OutcomeType.FAILED, error=OutcomeError(type(exc).__name__, str(exc))
+                    OutcomeType.FAILED,
+                    error=OutcomeError(
+                        type(exc).__name__, str(exc), getattr(exc, "code", "EXECUTION_FAILED")
+                    ),
+                    facts={"execution": getattr(exc, "execution_metadata", {})}
+                    if getattr(step, "stable_identity", False)
+                    else {},
                 )
+            if getattr(step, "stable_identity", False):
+                outcome.facts = redact(outcome.facts)
+                if outcome.error:
+                    outcome.error = OutcomeError(
+                        outcome.error.type, redact(outcome.error.message), outcome.error.code
+                    )
+                execution = outcome.facts.get("execution", {})
+                execution.setdefault("engine", attempt.input_snapshot.get("engine"))
+                execution.setdefault("model", attempt.input_snapshot.get("model"))
+                if outcome.error:
+                    execution.update(
+                        error_type=outcome.error.type,
+                        error_code=outcome.error.code or outcome.error.type,
+                        error=outcome.error.message,
+                    )
+                journal = self.services.execution_journal
+                if journal is not None:
+                    try:
+                        attempt.metadata["logs"] = journal.save(
+                            run_id, node.name, number, execution
+                        )
+                    except Exception as exc:
+                        # 日志存储失败不得掩盖真实节点结果。
+                        attempt.metadata["log_error"] = type(exc).__name__
+                for key in ("stdout", "stderr"):
+                    if key in execution:
+                        execution[key] = execution[key][:2048]
+            retry_policy = getattr(step, "retry_policy", self.retry)
             head = None
             if self.head_reader:
                 try:
@@ -216,10 +319,21 @@ class WorkflowRunner:
                 }
                 attempt.error_type = outcome.error.type if outcome.error else None
                 attempt.error_message = outcome.error.message if outcome.error else None
+                attempt.error_code = (
+                    (outcome.error.code or outcome.error.type) if outcome.error else None
+                )
                 for artifact in outcome.artifacts:
                     artifact.git_revision = head
                 attempt.artifacts = outcome.artifacts
                 attempt.metadata["git_head"] = head
+                attempt.metadata["duration_seconds"] = max(
+                    0, attempt.finished_at - attempt.started_at
+                )
+                if getattr(step, "stable_identity", False):
+                    execution = outcome.facts.get("execution", {})
+                    attempt.metadata.update(
+                        {k: execution.get(k) for k in ("engine", "model", "session_id")}
+                    )
                 self.repository.save_attempt(attempt)
                 for artifact in outcome.artifacts:
                     self.repository.save_artifact(artifact)
@@ -234,8 +348,8 @@ class WorkflowRunner:
                             attempt.input_snapshot
                         )
                         latest.last_error = attempt.error_message
-                        if failures <= self.retry.max_retries:
-                            retry_delay = self.retry.delay(failures)
+                        if failures <= retry_policy.max_retries:
+                            retry_delay = retry_policy.delay(failures)
                             latest.context["next_poll_at"] = self.services.clock.now() + retry_delay
                         else:
                             self._fail(latest, attempt.error_message)
@@ -246,6 +360,18 @@ class WorkflowRunner:
                         latest.last_error = outcome.error.message if outcome.error else None
                         if outcome.type is OutcomeType.FAILED:
                             self._fail(latest, latest.last_error or "步骤报告失败")
+                        elif outcome.type is OutcomeType.PAUSED:
+                            latest.status = RunStatus.PAUSED
+                            point = latest.context.get("pause_point", {})
+                            point.update(
+                                created_at=self.services.clock.now(),
+                                revision=latest.revision,
+                                attempt_id=attempt.attempt_id,
+                            )
+                            latest.context["pause_point"] = point
+                        elif outcome.type is OutcomeType.CANCELLED:
+                            latest.status = RunStatus.CANCELLED
+                            latest.finished_at = self.services.clock.now()
                         elif outcome.type is OutcomeType.WAITING:
                             if outcome.next_poll_at is None:
                                 self._fail(latest, "WAITING 必须提供 next_poll_at")
@@ -276,26 +402,93 @@ class WorkflowRunner:
                             latest.context.setdefault("recovery_inputs", {})[node.name] = deepcopy(
                                 attempt.input_snapshot
                             )
-                            if failures > self.retry.max_retries:
+                            if failures > retry_policy.max_retries:
                                 self._fail(latest, latest.last_error)
                         else:
                             self._fail(latest, latest.last_error or "步骤报告失败")
                     if previous_status is RunStatus.PAUSED and outcome.type is OutcomeType.WAITING:
                         latest.context["paused_from"] = RunStatus.WAITING.value
-                    if previous_status is RunStatus.PAUSED and outcome.type in {
+                    if (
+                        previous_status is RunStatus.PAUSED
+                        or getattr(step, "stable_identity", False)
+                    ) and outcome.type in {
                         OutcomeType.SUCCEEDED,
                         OutcomeType.SKIPPED,
                         OutcomeType.BLOCKED,
                     }:
-                        next_node = self.workflow.next_node(node.name, outcome.type, latest.context)
-                        if next_node:
-                            latest.current_step = next_node
+                        try:
+                            next_node = self.workflow.next_node(
+                                node.name, outcome.type, latest.context
+                            )
+                        except Exception as exc:
+                            if previous_status is RunStatus.PAUSED:
+                                self._fail(latest, str(exc))
                         else:
-                            latest.context["completed_while_paused"] = True
+                            if next_node:
+                                latest.current_step = next_node
+                            else:
+                                latest.context[
+                                    "completed_while_paused"
+                                    if previous_status is RunStatus.PAUSED
+                                    else "completed_while_cancelled"
+                                ] = True
+                if hasattr(step, "stage"):
+                    stage = next(
+                        s
+                        for s in latest.context["stage_executions"]
+                        if s["execution_id"] == attempt.metadata["stage_execution_id"]
+                    )
+                    stage["status"] = (
+                        "FAILED"
+                        if latest.status is RunStatus.FAILED
+                        else "CANCELLED"
+                        if latest.status is RunStatus.CANCELLED
+                        else "PAUSED"
+                        if latest.status is RunStatus.PAUSED
+                        else "COMPLETED"
+                        if (
+                            not hasattr(
+                                self.registry.resolve(
+                                    self.workflow.nodes[latest.current_step].step
+                                ),
+                                "stage",
+                            )
+                            or self.registry.resolve(
+                                self.workflow.nodes[latest.current_step].step
+                            ).stage
+                            != step.stage
+                            or getattr(
+                                self.registry.resolve(
+                                    self.workflow.nodes[latest.current_step].step
+                                ),
+                                "loop",
+                                None,
+                            )
+                            != step.loop
+                            or (
+                                step.loop
+                                and outcome.facts.get("loop_decisions", {}).get(step.loop.name)
+                                == "repeat"
+                            )
+                        )
+                        else "RUNNING"
+                    )
+                    if stage["status"] != "RUNNING":
+                        stage["finished_at"] = self.services.clock.now()
+                    if latest.status is RunStatus.FAILED:
+                        latest.context["fail_point"] = {
+                            "stage": step.stage,
+                            "job": node.name,
+                            "round": attempt.metadata["round"],
+                            "attempt_id": attempt.attempt_id,
+                            "error_code": attempt.error_code or "EXECUTION_FAILED",
+                        }
                 latest.updated_at = self.services.clock.now()
                 self.repository.update_run(latest)
                 event_type = (
-                    EventType.STEP_FAILED
+                    EventType.STEP_CANCELLED
+                    if outcome.type is OutcomeType.CANCELLED
+                    else EventType.STEP_FAILED
                     if outcome.type is OutcomeType.FAILED
                     else EventType.REVIEW_BLOCKED
                     if outcome.type is OutcomeType.BLOCKED
@@ -329,6 +522,8 @@ class WorkflowRunner:
                             EventType.RUN_FAILED, latest, payload={"error_type": attempt.error_type}
                         )
                     )
+                elif outcome.type is OutcomeType.PAUSED:
+                    pending.append(self._event(EventType.RUN_PAUSED, latest, node.name))
             self.events.publish(pending)
             if latest.status is not RunStatus.RUNNING or self.stop_requested():
                 return latest

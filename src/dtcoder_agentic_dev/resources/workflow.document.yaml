@@ -1,0 +1,16 @@
+name: document
+version: '1'
+description: 在独立工作区中根据需求编写文档，校验后保留产物。
+context: {}
+stages: [write]
+jobs:
+  document:
+    stage: write
+    agent: default
+    prompt: 根据任务需求编写 report.md，使用中文并注明尚未核实的事实。不要虚构调查结果。
+    outputs:
+      report: {path: report.md, kind: markdown}
+    artifact_check:
+      - {type: nonempty, path: report.md}
+    config:
+      execute: {humanAgentType: auto, timeout: 1800, retries: 1}

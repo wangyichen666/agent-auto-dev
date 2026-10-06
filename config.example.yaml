@@ -81,3 +81,9 @@ repositories: []
 #         env: pre
 #       env_file: null
 #       source: skill
+# 声明式任务：不填 --repo 时使用独立无仓工作区，保持旧 Issue 产品配置兼容。
+declarative:
+  directory: workflows
+  skills_directory: skills
+tools:
+  allowed_commands: [] # 默认拒绝命令；按受信任参数前缀显式放行，例如 [[python, -m, pytest]]

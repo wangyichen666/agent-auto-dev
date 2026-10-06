@@ -81,3 +81,64 @@ def test_dry_run_process_queue_no_git_or_codex(tmp_path, mocker):
     assert CliRunner().invoke(app, ["--config", str(path), "run-once"]).exit_code == 0
     external.assert_not_called()
     assert CliRunner().invoke(app, ["--config", str(path), "config", "show"]).exit_code == 0
+
+
+def test_submit_local_yaml_and_controls(tmp_path):
+    path = initialize(tmp_path)
+    workflow = tmp_path / "workflow.yaml"
+    workflow.write_text(
+        """name: files
+version: '1'
+stages: [write]
+jobs:
+  save:
+    stage: write
+    type: tool
+    toolName: file.write
+    config:
+      path: result.txt
+      content: 任务产物
+      execute: {humanAgentType: approval}
+    outputs: {result: result.txt}
+""",
+        encoding="utf-8",
+    )
+    cli = CliRunner()
+    result = cli.invoke(
+        app, ["--config", str(path), "submit", "--workflow", str(workflow), "--task", "保存文档"]
+    )
+    assert result.exit_code == 0, result.output
+    store = SQLiteRunRepository(tmp_path / "state.db")
+    run = store.list_runs()[0]
+    store.close()
+    assert run.status.value == "PAUSED"
+    result = cli.invoke(
+        app, ["--config", str(path), "resume", "--run", run.run_id, "--feedback", "已批准"]
+    )
+    assert result.exit_code == 0, result.output
+    result = cli.invoke(app, ["--config", str(path), "run-once"])
+    assert result.exit_code == 0, result.output
+    assert (tmp_path / "workspaces" / run.run_id / "result.txt").read_text() == "任务产物"
+    assert cli.invoke(app, ["--config", str(path), "show", "--run", run.run_id]).exit_code == 0
+    assert cli.invoke(app, ["--config", str(path), "cleanup", "--run", run.run_id]).exit_code == 0
+    assert not (tmp_path / "workspaces" / run.run_id).exists()
+    assert (tmp_path / "workflow-definitions" / run.run_id / "workflow.yaml").exists()
+
+
+def test_validate_workflow_without_running_commands(tmp_path, mocker):
+    path = initialize(tmp_path)
+    external = mocker.patch(
+        "dtcoder_agentic_dev.infrastructure.process.command.SubprocessCommandRunner.run"
+    )
+    result = CliRunner().invoke(
+        app,
+        [
+            "--config",
+            str(path),
+            "workflow",
+            "validate",
+            str(tmp_path / "workflows/local-files.yaml"),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    external.assert_not_called()

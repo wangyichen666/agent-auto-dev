@@ -56,6 +56,17 @@ class PromptConfig:
 
 
 @dataclass
+class DeclarativeConfig:
+    directory: str = ""
+    skills_directory: str = ""
+
+
+@dataclass
+class ToolConfig:
+    allowed_commands: list[list[str]] = field(default_factory=list)
+
+
+@dataclass
 class CodeHostConfig:
     adapter: str = "logging"
     token_env: str = ""
@@ -146,6 +157,8 @@ class AppConfig:
     workflow: WorkflowConfig = field(default_factory=WorkflowConfig)
     repositories: list[RepoConfig] = field(default_factory=list)
     dry_run: bool = False
+    declarative: DeclarativeConfig = field(default_factory=DeclarativeConfig)
+    tools: ToolConfig = field(default_factory=ToolConfig)
 
 
 DEFAULT_CONFIG = Path("~/.dtcoder-agentic-dev/config.yaml").expanduser()
@@ -160,6 +173,8 @@ SECTIONS = {
     "pipeline": PipelineConfig,
     "notification": NotificationConfig,
     "workflow": WorkflowConfig,
+    "declarative": DeclarativeConfig,
+    "tools": ToolConfig,
 }
 
 
@@ -256,6 +271,15 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     config.workspace.mirrors = _path(config.workspace.mirrors or "mirrors", state_base)
     config.workspace.workspaces = _path(config.workspace.workspaces or "workspaces", state_base)
     config.prompts.directory = _path(config.prompts.directory or "prompts", base)
+    config.declarative.directory = _path(config.declarative.directory or "workflows", base)
+    config.declarative.skills_directory = _path(
+        config.declarative.skills_directory or "skills", base
+    )
+    if any(
+        not command or any(not argument or "\x00" in argument for argument in command)
+        for command in config.tools.allowed_commands
+    ):
+        raise ConfigurationError("tools.allowed_commands 必须为非空字符串命令前缀列表")
     config.notification.templates_directory = _path(
         config.notification.templates_directory or "comments", base
     )
@@ -406,6 +430,7 @@ def redacted_config(config: AppConfig) -> dict[str, Any]:
     data = asdict(config)
     # 只展示安全配置；额外 CLI 参数和验证命令可能由用户放入凭据。
     data["codex"]["extra_args"] = ["<已隐藏>"] if config.codex.extra_args else []
+    data["tools"]["allowed_commands"] = ["<已隐藏>"] if config.tools.allowed_commands else []
     for repo in data["repositories"]:
         repo["validation_commands"] = ["<已隐藏>"] if repo["validation_commands"] else []
     data["notification"]["api_url"] = "<已隐藏>" if config.notification.api_url else ""

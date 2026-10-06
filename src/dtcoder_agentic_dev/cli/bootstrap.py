@@ -11,7 +11,9 @@ from dtcoder_agentic_dev.adapters.notification.null import NullNotifier
 from dtcoder_agentic_dev.adapters.persistence.sqlite import SQLiteRunRepository
 from dtcoder_agentic_dev.adapters.pipeline.aci import ACIAdapter
 from dtcoder_agentic_dev.adapters.pipeline.disabled import DisabledPipelineAdapter
+from dtcoder_agentic_dev.adapters.tools.local import LocalTools
 from dtcoder_agentic_dev.application.services.comments import IssueCommentHandler
+from dtcoder_agentic_dev.application.services.declarative import DeclarativeRunService
 from dtcoder_agentic_dev.application.services.event_views import EventViewBuilder
 from dtcoder_agentic_dev.application.services.events import EventDispatcher
 from dtcoder_agentic_dev.application.services.pipeline_control import PipelineCancellationHandler
@@ -20,7 +22,7 @@ from dtcoder_agentic_dev.application.workflows import issue_development_workflow
 from dtcoder_agentic_dev.config import load_config
 from dtcoder_agentic_dev.domain.errors import CapabilityNotConfigured
 from dtcoder_agentic_dev.domain.workflow import StepServices
-from dtcoder_agentic_dev.engine.registry import StepRegistry
+from dtcoder_agentic_dev.engine.registry import ExecutorRegistry, StepRegistry
 from dtcoder_agentic_dev.engine.retry import RetryPolicy
 from dtcoder_agentic_dev.engine.runner import WorkflowRunner
 from dtcoder_agentic_dev.engine.steps.development import (
@@ -31,6 +33,9 @@ from dtcoder_agentic_dev.engine.steps.development import (
 )
 from dtcoder_agentic_dev.engine.steps.external import CreatePRStep, PipelineStep
 from dtcoder_agentic_dev.infrastructure.filesystem.artifacts import FileArtifactStore
+from dtcoder_agentic_dev.infrastructure.filesystem.definitions import WorkflowDefinitionStore
+from dtcoder_agentic_dev.infrastructure.filesystem.journal import FileExecutionJournal
+from dtcoder_agentic_dev.infrastructure.filesystem.workspace import LocalTaskWorkspace
 from dtcoder_agentic_dev.infrastructure.git.client import GitClient
 from dtcoder_agentic_dev.infrastructure.git.workspace import GitWorktreeWorkspaceManager
 from dtcoder_agentic_dev.infrastructure.locking.file import RunExecutionGuard
@@ -57,6 +62,7 @@ class Runtime:
     commands: object
     renderer: object
     git: object
+    declarative: object
 
     def close(self):
         closer = getattr(self.store, "close", None)
@@ -151,7 +157,31 @@ def build_runtime(
         CreatePRStep(renderer, git, host, store, ids),
     ):
         registry.register(step)
-    services = StepServices(executor, FileArtifactStore(clock, ids), clock)
+    services = StepServices(
+        executor, FileArtifactStore(clock, ids), clock, FileExecutionJournal(logs / "runs")
+    )
+    executors = ExecutorRegistry()
+    executors.register_agent("codex", executor)
+    executors.register_agent("default", executor)
+    LocalTools(commands, config.tools.allowed_commands).register(executors)
+    declarative = DeclarativeRunService(
+        store,
+        WorkflowDefinitionStore(
+            Path(config.state.directory) / "workflow-definitions",
+            config.declarative.skills_directory,
+        ),
+        executors,
+        services,
+        events,
+        ids,
+        clock,
+        config.workspace.workspaces,
+        sleeper,
+        max_nodes=config.scheduler.max_nodes_per_tick,
+        head_reader=git.head_sha,
+        local_workspace=LocalTaskWorkspace(config.workspace.workspaces),
+        stop_requested=lambda: scheduler.stopping,
+    )
     engine = WorkflowRunner(
         store,
         registry,
@@ -167,12 +197,30 @@ def build_runtime(
     )
     guard = RunExecutionGuard(Path(config.state.directory) / "locks/runs")
     runs = RunService(
-        store, config, host, workspace, events, clock, ids, guard, pipeline=pipeline, git=git
+        store,
+        config,
+        host,
+        workspace,
+        events,
+        clock,
+        ids,
+        guard,
+        pipeline=pipeline,
+        git=git,
+        declarative=declarative,
     )
     dispatcher = Dispatcher(
-        store, config, workspace, engine, events, clock, ids.new(), execution_guard=guard
+        store,
+        config,
+        workspace,
+        engine,
+        events,
+        clock,
+        ids.new(),
+        execution_guard=guard,
+        declarative=declarative,
     )
     scheduler = SchedulerRunner(
         Poller(config, host, runs), dispatcher, sleeper, config.scheduler.poll_interval
     )
-    return Runtime(config, store, runs, scheduler, dispatcher, commands, renderer, git)
+    return Runtime(config, store, runs, scheduler, dispatcher, commands, renderer, git, declarative)

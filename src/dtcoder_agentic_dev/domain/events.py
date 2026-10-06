@@ -19,6 +19,9 @@ class EventType(str, Enum):
     RUN_SUCCEEDED = "RunSucceeded"
     RUN_FAILED = "RunFailed"
     RUN_CANCELLED = "RunCancelled"
+    RUN_PAUSED = "RunPaused"
+    RUN_RESUMED = "RunResumed"
+    STEP_CANCELLED = "StepCancelled"
 
 
 @dataclass

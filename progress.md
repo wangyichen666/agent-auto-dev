@@ -1,15 +1,23 @@
-# 进度
+# 验证进度
 
-- 已读取需求并确认空目录。
-- 正在创建基础项目与核心模型。
-- 已创建领域模型、错误分类、工作流定义与所有核心端口。
-- 首次 pip 安装因沙箱 DNS 限制失败；改用桌面应用捆绑运行时，不依赖真实服务。
-- 核心领域、端口、内存/SQLite、命令/Git/Codex、引擎、默认步骤、调度器及 CLI 已实现。
-- 当前 82 项测试通过，覆盖真实默认步骤完整流程、Blocker 循环、SQLite 重开恢复和远端成功后本地失败。
-- 已安装指定公开依赖；开发验证未访问任何真实代码托管、Codex、流水线或通知服务。
-- 末轮时序审阅发现 SIGINT/SIGTERM 需要在引擎节点边界停止推进；已注入停止回调并补充原子步骤完成后退出及继续恢复测试。
-- 可编辑安装、wheel 构建与资源清单、临时目录初始化和未配置认证的 doctor 诊断均通过。
-- Git 无索引差异审计返回 1 表示全新增差异，并非空白错误；已修正审计器返回码判断。
+- 已读取用户完整任务、README、architecture、示例配置与 pyproject。
+- 尚未修改业务代码；正在确认测试基线与可复用接口。
 
-- 最终验证：112 passed，Ruff 与 compileall 通过；验证详情记录在 docs/verification.md。
-- 未执行 Git commit、push、merge 或 rebase；默认配置目录未被写入，CLI 实测均使用临时目录。
+- 基线：.venv/bin/pytest -q → 209 passed, 1 skipped；PATH 无 pytest，采用项目虚拟环境。
+- 行为测试首次按预期因缺少 YAML 模块失败；实现后首轮 23 项聚焦测试全部通过。
+- 包含新测试的全量：232 passed, 1 skipped；尚待 CLI 装配、资源与扩大安全覆盖。
+
+- CLI submit/workflow validate、人工审批/反馈/重试/清理闭环通过。
+- 新测试发现并修复：人工节点覆盖手工产物、取消后重复原子动作、循环重试突破轮数上限、post_actions 使已校验产物失效、非法类型 TypeError、重复参数与 JSON 凭据日志遗漏。
+- 目前聚焦 YAML/CLI/恢复：66 项通过；Codex 参数/日志与脱敏：24 项通过。
+- 新增测试均使用临时目录、SQLite 与 fake/mocked executor，无真实模型请求或用户仓库操作。
+
+## 第一批最终验收
+
+- pytest -q：291 passed、1 skipped；相对基线新增 82 项通过测试。
+- compileall、ruff check、ruff format --check、git diff --check：全部通过。
+- python -m build：隔离构建 wheel 与 sdist 成功。
+- agent-auto-dev 的总帮助、doctor/process/rollback/submit/workflow 帮助及旧命令总帮助：全部通过。
+- 最终 wheel 以 --no-deps --no-index 安装到临时目录，验证确实从 wheel 导入；init/validate/submit 离线执行及真实文件产物通过，模板/配置资源与双入口通过。
+- 唯一跳过：系统 Git 2.39.5 的 orphan worktree 测试；未访问真实模型/业务网络或修改用户仓库。
+- 第一批实现与验收完成。下一批尚未实施，顺序与边界见 task_plan.md、docs/workflows.md。

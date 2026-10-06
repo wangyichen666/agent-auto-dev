@@ -15,6 +15,7 @@ dev = ["pytest>=7", "pytest-mock>=3.10", "ruff>=0.9", "build>=1"]
 
 [project.scripts]
 dtcoder-agentic-dev = "dtcoder_agentic_dev.cli.app:main"
+agent-auto-dev = "dtcoder_agentic_dev.cli.app:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

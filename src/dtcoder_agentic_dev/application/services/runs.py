@@ -30,10 +30,12 @@ class RunService:
         *,
         pipeline=None,
         git=None,
+        declarative=None,
     ):
         self.store, self.config, self.host = store, config, code_host
         self.workspace, self.events, self.clock, self.ids = workspace, events, clock, ids
         self.pipeline, self.git = pipeline, git
+        self.declarative = declarative
         self.execution_guard = execution_guard or (lambda run_id: nullcontext())
 
     def resolve_repository(self, hint):
@@ -126,7 +128,13 @@ class RunService:
             self.store.list_operations(run_id),
         )
 
-    def control(self, run_id, action):
+    def control(self, run_id, action, *, feedback=None, mode="revise"):
+        if self.store.load_run(run_id).context.get("workflow_definition"):
+            if self.declarative is None:
+                raise ConfigurationError("YAML 任务控制未装配")
+            return self.declarative.control(run_id, action, feedback=feedback, mode=mode)
+        if feedback is not None or mode != "revise":
+            raise ConfigurationError("旧 Issue 工作流暂不支持人工反馈和会话续聊")
         transitions = {
             "pause": ({RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING}, RunStatus.PAUSED),
             "resume": ({RunStatus.PAUSED}, RunStatus.QUEUED),
@@ -166,8 +174,12 @@ class RunService:
         self.events.publish(events)
         return run
 
-    def retry(self, run_id):
+    def retry(self, run_id, *, feedback=None, mode="revise"):
         old = self.store.load_run(run_id)
+        if old.context.get("workflow_definition"):
+            return self.declarative.control(run_id, "retry", feedback=feedback, mode=mode)
+        if feedback is not None or mode != "revise":
+            raise ConfigurationError("旧 Issue 重跑暂不支持人工反馈和会话续聊")
         if old.status not in TERMINAL_STATUSES:
             raise ConfigurationError("只能为终止运行创建新的重跑记录")
         repo = self.resolve_repository(old.repository_id)

@@ -152,3 +152,41 @@ def test_empty_template_rejected(tmp_path):
     (tmp_path / "empty.txt").write_text("  \n", encoding="utf-8")
     with pytest.raises(TechnicalError, match="模板为空"):
         StrictPromptRenderer(str(tmp_path)).render("empty", {})
+
+
+def test_codex_yaml_request_no_repo_model_timeout_and_redacted_logs(tmp_path, mocker):
+    workspace = tmp_path / "no-repo"
+    workspace.mkdir()
+    commands = mocker.Mock()
+    commands.run.return_value = CommandResult(
+        (),
+        0,
+        '{"type":"thread.started","thread_id":"session-id"}\n{"type":"turn.completed"}',
+        "token=private-secret",
+        1,
+    )
+    adapter = CodexAdapter(CodexConfig(output_format="json"), commands, str(tmp_path / "logs"))
+    request = AgentExecutionRequest(
+        "run",
+        "write",
+        1,
+        str(workspace),
+        "password=private-secret",
+        model="selected",
+        timeout=3,
+        allow_no_repo=True,
+    )
+    result = adapter.execute(request)
+    assert result.structured["session_id"] == "session-id"
+    assert commands.run.call_args.args[0] == [
+        "codex",
+        "exec",
+        "--json",
+        "--model",
+        "selected",
+        "--skip-git-repo-check",
+        "-",
+    ]
+    assert commands.run.call_args.kwargs["timeout"] == 3
+    for path in (tmp_path / "logs").rglob("*.txt"):
+        assert "private-secret" not in path.read_text()

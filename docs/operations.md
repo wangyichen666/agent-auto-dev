@@ -135,3 +135,15 @@ systemctl --user stop dtcoder-agentic-dev.service
 ## macOS launchd
 
 [launchd 模板](deployment/com.dtcoder.agentic-dev.plist) 使用 __HOME__ 部署占位符，安装时必须替换为当前用户 home，XML 必须正确转义。按虚拟环境位置调整 ProgramArguments，保存到 ~/Library/LaunchAgents/com.dtcoder.agentic-dev.plist 后用 launchctl bootstrap gui/$(id -u) 管理。不要原样加载含占位符的模板。启用前创建 logs 目录并先 init/doctor。停服务使用 launchctl bootout；服务直接运行前台 run，避免与 PID 管理命令混用。
+
+## 声明式任务运维
+
+`agent-auto-dev` 是 `dtcoder-agentic-dev` 的兼容命令别名。init 新增 workflows/document.yaml 与 workflows/local-files.yaml；重复初始化保留用户副本。declarative.directory 和 skills_directory 相对配置目录展开；workflow-definitions 相对 state.directory 固定保存运行快照。
+
+首次验证可使用 local-files.yaml，完全离线执行文件处理与校验。真实 document 默认使用现有 Codex 登录态；本批尚不提供 Claude 登录诊断或 Claude 运行时。doctor 的原有诊断语义保持兼容，不执行模型请求。
+
+命令/脚本默认关闭，通过 tools.allowed_commands 显式放行受信任参数前缀。外部命令以参数数组运行，不使用 shell。节点 timeout 下发给同步命令并在验证/后置动作边界检查，当前没有异步 manager 的进程树取消。停止调度器后，未完 RUNNING 可恢复；PAUSED 不自动执行。
+
+备份人工流程应同时保存 state.db（SQLite 一致性备份）、workflow-definitions、logs 和任务产物；本批不提供自动对象存储备份。恢复定义摘要错误时明确失败，不能用最新模板覆盖历史记录。无仓 cleanup 校验 owner.json、终态、租约和执行锁，拒绝未知目录，定义与 SQLite 历史保留。此机制不代替后续保留期清理、备份互斥或 manifest 服务。
+
+详细任务操作与 YAML 格式见 [workflows.md](workflows.md)。

@@ -9,6 +9,7 @@ from dtcoder_agentic_dev.domain.models import Artifact, Issue, WorkflowRun
 from dtcoder_agentic_dev.ports.agent_executor import AgentExecutorPort
 from dtcoder_agentic_dev.ports.artifact_store import ArtifactStore
 from dtcoder_agentic_dev.ports.clock import Clock
+from dtcoder_agentic_dev.ports.execution_journal import ExecutionJournal
 
 
 class OutcomeType(str, Enum):
@@ -17,6 +18,8 @@ class OutcomeType(str, Enum):
     WAITING = "WAITING"
     SKIPPED = "SKIPPED"
     FAILED = "FAILED"
+    PAUSED = "PAUSED"
+    CANCELLED = "CANCELLED"
 
 
 @dataclass(frozen=True)
@@ -35,12 +38,14 @@ class StepServices:
     agent_executor: AgentExecutorPort
     artifact_store: ArtifactStore
     clock: Clock
+    execution_journal: ExecutionJournal | None = None
 
 
 @dataclass(frozen=True)
 class OutcomeError:
     type: str
     message: str
+    code: str | None = None
 
 
 @dataclass
@@ -104,8 +109,13 @@ class WorkflowDefinition:
                 if source_key in unconditional:
                     raise ConfigurationError("同一节点结果存在多个无条件迁移")
                 unconditional.add(source_key)
-            if t.on in {OutcomeType.WAITING, OutcomeType.FAILED}:
-                raise ConfigurationError("WAITING 和 FAILED 由引擎处理，不能定义迁移")
+            if t.on in {
+                OutcomeType.WAITING,
+                OutcomeType.FAILED,
+                OutcomeType.PAUSED,
+                OutcomeType.CANCELLED,
+            }:
+                raise ConfigurationError("WAITING、FAILED 和 PAUSED 由引擎处理，不能定义迁移")
             if self.nodes[t.source].terminal:
                 raise ConfigurationError("终止节点不能有出边")
         reachable = {self.start}
