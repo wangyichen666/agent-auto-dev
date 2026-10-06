@@ -1,4 +1,4 @@
-# 声明式任务工作流（第一批）
+# 声明式任务工作流（第一、二批）
 
 本批实现严格 YAML 定义、agent/tool 分发、阶段与尝试记录、有限循环、产物验证和 CLI 提交闭环。新任务使用 `submit`，编译后复用既有 `WorkflowRunner`、SQLite CAS、数据库租约、heartbeat 和运行文件锁。原有 `process --repo --issue` 产品与公开命令继续可用。
 
@@ -13,7 +13,7 @@ agent-auto-dev --config ./runtime/config.yaml submit \
 agent-auto-dev --config ./runtime/config.yaml list --all
 ```
 
-`local-files.yaml` 是不调用模型的文件处理示例；它只演示 YAML 生命周期，不声称理解自然语言或完成调研。默认 `document.yaml` 则真实调用 agent，根据 `--task` 生成 `report.md` 并校验非空。当前 `agent: default` 显式路由到 Codex；Claude CLI/SDK 和异步执行器属于下一批。
+`local-files.yaml` 是不调用模型的文件处理示例；它只演示 YAML 生命周期，不声称理解自然语言或完成调研。默认 `document.yaml` 则真实调用 agent，根据 `--task` 生成 `report.md` 并校验非空。新初始化的 `agent: default` 路由到 Claude CLI；未声明 agents 的旧配置保持 Codex，并给出迁移提示。Claude CLI/SDK 和 Codex 共用异步 manager 与既有持久化生命周期。
 
 ```bash
 agent-auto-dev --config ./runtime/config.yaml submit --task '整理项目的运维流程'
@@ -111,11 +111,11 @@ agent-auto-dev --config ./runtime/config.yaml cancel --run RUN_ID
 agent-auto-dev --config ./runtime/config.yaml skip --run RUN_ID
 ```
 
-暂停点与反馈带时间、revision、节点、轮次和可用 session_id，反馈持久化前脱敏，历史不删除。当前 revise 从暂停边界继续；循环耗尽的 revise 重启该有限循环并保留上一轮记录。continue_conversation 显式拒绝，尚未实现 session resume。人工节点验证失败可以 retry，已成功 attempt 与 artifact 不被改写。
+暂停点与反馈带时间、revision、节点、轮次和可用 session_id，反馈持久化前脱敏，历史不删除。当前 revise 从暂停边界继续；循环耗尽的 revise 重启该有限循环并保留上一轮记录。continue_conversation 支持受管 Claude CLI/SDK 与 Codex CLI 的 session resume；当前节点必须有匹配的持久化 session 和引擎，否则显式拒绝。retry --mode continue_conversation 保留失败节点会话，默认 revise 开始新执行，不清除反馈。人工节点验证失败可以 retry，已成功 attempt 与 artifact 不被改写。
 
 YAML retry 只允许 FAILED/CANCELLED，使用原 run 的失败节点并创建新的 attempt；已完成节点不重放。循环耗尽后的 retry 新建循环执行代次，重新遵守原轮数上限。旧 Issue 产品 retry 仍保留创建后继 run 的历史语义。skip 只接受 PAUSED 且声明 allow_skip 的节点，记录真实 SKIPPED attempt；跳过的 producer 没有成功产物，下游不能将其作为成功输入。
 
-pause/cancel 写持久化意图，在每个原子动作前再次检查。已开始的同步动作自然完成，保存真实结果，然后停止新节点；当前尚未实现对模型子进程的协作式中断。有效租约下禁止 resume/retry/skip。PAUSED/CANCELLED 不自动恢复；RUNNING 的中断 attempt 标为 PROCESS_INTERRUPTED，并创建新 attempt。
+pause/cancel 写持久化意图，在每个原子动作前再次检查。受管模型动作协作取消并回收自身进程组；其他同步动作自然完成并保存真实结果，然后停止新节点。取消错误单独映射为 PAUSED/CANCELLED，不能伪造成功。有效租约下禁止 resume/retry/skip。PAUSED/CANCELLED 不自动执行；RUNNING 的中断 attempt 保留为 PROCESS_INTERRUPTED。受管 CLI 仅在冻结定义、引擎与 session 匹配且历史进程组已经退出时创建续聊 attempt，否则暂停。SDK 归属证明缺失时暂停，要求 revise。工具继续沿用原恢复语义。
 
 ## 持久化与兼容
 
@@ -137,4 +137,19 @@ SQLite 沿用 schema v1 的 JSON payload 可选扩展，不删除旧列、表或
 
 ## 后续边界
 
-Claude CLI/SDK、统一异步 manager、session resume、结构化 handoff、reset、多仓两阶段提交/回退、HTTP API、前端、资源监控与备份/定时清理尚未实现。当前 YAML 核心执行器注册表、工具 Port、文件定义 Port 和日志 Port 可供后续批次复用，不宣称这些后续能力已可用。
+结构化 handoff、reset、多仓两阶段提交/回退、HTTP API、前端、资源监控与备份/定时清理尚未实现。当前 YAML 核心执行器注册表、工具 Port、文件定义 Port 和日志 Port 可供后续批次复用，不宣称这些后续能力已可用。
+
+
+## 执行器与恢复边界（第二批）
+
+注册名称：default、claude/claude-cli、claude-sdk、codex/codex-cli。模型精确路由配置在 agents.model_routes；没有匹配路由时采用显式默认引擎，未知引擎不回退。新 submit 的 resolved 定义保存选定引擎及已配置的默认模型；未显式配置模型时由执行器自身默认值决定，记录的 model 可以为空，不虚构具体模型名称。
+
+Claude CLI 使用参数数组 `claude --print --output-format json|stream-json --max-turns N --permission-mode MODE`，提示词从 stdin 输入；model、allowedTools、resume 按结构化配置追加。stream-json 添加 verbose，session 可以在执行结束前落盘。工具自动许可不等于移除其他工具或 OS 沙箱。权限、Git 和文件范围仍需宿主环境提供适当隔离。
+
+AgentExecutionRequest 新增可选 session_id、cancel_requested 与 on_event，旧构造方式兼容；结果新增四种终态，旧同步 Port 仍可注入。GenericCLIExecutor 接受可信命令数组，用于自定义协议/替身；不猜测其 resume 参数。Claude CLI/SDK 必须返回合法终态，is_error、异常、轮次耗尽、缺失结果或 aborted 不能当作成功。SESSION_LOST 属于需人工处理的错误，连接故障仍按技术策略重试。
+
+manager 句柄只表示本进程的执行情况。真实查询和重启恢复使用 SQLite；每次调用前保存 RUNNING attempt，流式事件在同一租约下更新 session/进程归属，stale writer 拒绝写入。heartbeat、调度、CLI 控制与跨进程文件锁保持原边界。恢复遇到历史进程组仍存活时持久化 orphan_process_active 暂停；保守检查只探测已记录的进程组，不杀进程，不匹配其他会话。进程组 ID 被复用时也可能保守阻断，不能据此执行模糊清理。
+
+SDK 通过公开 query/ClaudeAgentOptions 流读取消息，resume 指定 session，取消/超时关闭当前迭代器与 transport；只有导入失败允许显式 CLI 回退。SDK 没有向平台暴露可验证 PID，因此崩溃后的 SDK 自动接管暂不支持。首次调用、人工暂停后的续聊和失败重试已覆盖替身契约，未向真实模型发送请求。
+
+Prompt 构建器使用 agent_zh.txt/agent_en.txt，context.language 为 zh/en。模板只允许 instructions/context 两个简单变量，提交时把文本、schema 和摘要冻结在 resolved_workflow.yaml。init 保留用户副本，显式 update_templates 先备份。注入 task、repository、workspace、声明输入/输出、参数上下文和本节点反馈；knowledge 目前作为显式上下文引用保留，结构化 handoff 和知识读取 Port 仍待下一批。

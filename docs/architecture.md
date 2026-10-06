@@ -163,7 +163,7 @@ CodexAdapter 统一构造 `binary exec [extra_args] [--json] -`，通过 stdin �
 
 所有测试禁止真实网络和真实 Codex。Git commit/push/merge/rebase 在测试级守卫中禁止，提交/推送只用命令 mock。真实 worktree 测试使用较新 Git 的 --orphan，不制造测试提交；较老 Git 可指定 DTCODER_TEST_GIT 或跳过此单项。
 
-后续优先：真实平台/CI/通知契约、远端幂等验证、持久化事件重发、故障注入和多进程压力测试。目前未实现数据库结构迁移、旧独立 JSON 导入、双写、Web、队列、Kubernetes 或生产部署；v1 payload 的新增可选字段保留兼容读取。
+后续优先：结构化 handoff、多仓与本地通用扩展、HTTP API/面板、持久化事件重发、故障注入和多进程压力测试。现有平台/CI/通知实现仅兼容保留，不新增企业集成。目前未实现数据库结构迁移、旧独立 JSON 导入、双写、Web、队列、Kubernetes 或生产部署；v1 payload 的新增可选字段保留兼容读取。
 
 
 ## 新增产品外部装配
@@ -197,3 +197,14 @@ YAML run 保存原始/实际定义文件的摘要引用，恢复时只读取冻�
 原 Issue 产品节点图继续兼容；本批尚未把其评审、流水线和远端语义迁移为 YAML 模板。新自然语言 submit 统一通过 YAML 编译。旧重跑创建新 run；YAML retry 保留当前 run 和全部 attempts，仅恢复失败 job。后续迁移须保持这项公开行为说明与测试。
 
 详细 schema、恢复边界、工具白名单、人工语义与后续未实现项目见 [workflows.md](workflows.md)，应用服务边界见 [api.md](api.md)。
+
+
+## 多执行器与统一异步边界（第二批）
+
+Ports 保留同步 AgentExecutorPort 并新增 AsyncAgentExecutorPort；Request 的新增字段均有兼容默认值。application.AgentRouter 负责显式配置和模型精确路由，ManagedAgentExecutor 把每次执行绑定到当前 attempt 和租约。Infrastructure.AgentManager 持有事件循环和有界执行容量，只管理运行句柄，不另建业务状态；停止时等待执行器实际回收，避免取消 asyncio future 后遗留写工作区的线程。
+
+Claude CLI/SDK 与 Codex 实现 Ports。模型 CLI 使用 CancellableCommandRunner 的 shell=False/Popen、专属进程组、有界输出及 stdin；普通工具/Git CommandRunner 保留兼容。session 和进程组事件在事务中写入 RUNNING attempt，过期租约拒绝写入。结果四种终态与异常类型分别映射到工作流状态，失败不包装成成功。SDK 回退只允许导入不可用，记录实际 CLI 引擎。
+
+YAML 提交把 default 选定引擎、已配置默认模型及双语 Prompt 模板冻结到 resolved 定义。TaskPromptBuilder 实现独立 Port，工作流内核没有文件 IO 或具体厂商依赖。旧 definition 无模板快照时保留原提示词兼容路径。
+
+恢复先检查历史 CLI 进程组；存活则持久化暂停并阻止人工 revise/skip 启动新 writer。进程退出后，CLI 恢复还要求定义/引擎/session 匹配。没有 session 或 SDK 无归属证明时要求人工 revise。旧状态 schema 仍为 v1，新增内容只存在可选 metadata/context，旧 payload 的读取测试继续通过。SDK 崩溃自动接管、跨主机进程隔离和恢复属于后续边界。

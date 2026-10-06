@@ -9,7 +9,13 @@ from dtcoder_agentic_dev.application.yaml_workflows import (
 )
 from dtcoder_agentic_dev.domain.errors import ConcurrencyConflict, ConfigurationError
 from dtcoder_agentic_dev.domain.events import EventType
-from dtcoder_agentic_dev.domain.models import ACTIVE_STATUSES, Issue, RunStatus, WorkflowRun
+from dtcoder_agentic_dev.domain.models import (
+    ACTIVE_STATUSES,
+    AttemptStatus,
+    Issue,
+    RunStatus,
+    WorkflowRun,
+)
 from dtcoder_agentic_dev.domain.security import redact, redact_text
 from dtcoder_agentic_dev.engine.runner import WorkflowRunner
 
@@ -31,6 +37,7 @@ class DeclarativeRunService:
         head_reader=None,
         local_workspace=None,
         stop_requested=None,
+        process_is_alive=None,
     ):
         self.store, self.definitions, self.executors, self.services = (
             store,
@@ -48,6 +55,7 @@ class DeclarativeRunService:
         self.max_nodes, self.head_reader = max_nodes, head_reader
         self.local_workspace = local_workspace
         self.stop_requested = stop_requested or (lambda: False)
+        self.process_is_alive = process_is_alive
 
     def parse(self, source):
         return parse_workflow(
@@ -68,6 +76,40 @@ class DeclarativeRunService:
                 for job in definition.jobs
             ),
         )
+        # default 的选择在提交时冻结，之后的配置改变不会重新选择历史引擎。
+        definition = replace(
+            definition,
+            jobs=tuple(
+                replace(job, agent=self.executors.resolve_agent("default").engine_for(job.model))
+                if job.type == "agent"
+                and job.agent == "default"
+                and hasattr(self.executors.resolve_agent("default"), "engine_for")
+                else job
+                for job in definition.jobs
+            ),
+        )
+        definition = replace(
+            definition,
+            jobs=tuple(
+                replace(
+                    job,
+                    model=getattr(self.executors.resolve_agent(job.agent), "default_model", None),
+                )
+                if job.type == "agent" and job.model is None
+                else job
+                for job in definition.jobs
+            ),
+        )
+        if self.services.prompt_builder is not None:
+            definition = replace(
+                definition,
+                metadata={
+                    **definition.metadata,
+                    "prompt_template": self.services.prompt_builder.freeze(
+                        definition.context.get("language", "zh")
+                    ),
+                },
+            )
         compile_workflow(definition, self.executors, repo_available=repo is not None)
         resolved = resolved_yaml(definition)
         self.parse(resolved)
@@ -109,7 +151,51 @@ class DeclarativeRunService:
         self.events.publish([event])
         return run
 
+    def _live_process(self, run_id):
+        if self.process_is_alive is None:
+            return None
+        for attempt in self.store.list_attempts(run_id):
+            record = attempt.metadata.get("process")
+            if record and self.process_is_alive(record):
+                return attempt
+        return None
+
     def runner_for(self, run):
+        orphan = self._live_process(run.run_id)
+        if orphan is not None:
+            with self.store.transaction():
+                self.store.assert_lease(run.run_id, run.lease_owner, self.clock.now())
+                current = self.store.load_run(run.run_id)
+                if current.status in {RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING}:
+                    current.status = RunStatus.PAUSED
+                    current.context["pause_point"] = {
+                        "job": orphan.step_name,
+                        "stage": orphan.metadata.get("stage"),
+                        "round": orphan.metadata.get("round", 1),
+                        "reason": "orphan_process_active",
+                        "session_id": orphan.metadata.get("session_id"),
+                        "attempt_id": orphan.attempt_id,
+                        "created_at": self.clock.now(),
+                        "revision": current.revision,
+                    }
+                    for stage in current.context.get("stage_executions", []):
+                        if stage["execution_id"] == orphan.metadata.get("stage_execution_id"):
+                            stage.update(status="PAUSED", finished_at=self.clock.now())
+                    if orphan.status is AttemptStatus.RUNNING:
+                        orphan.status = AttemptStatus.PAUSED
+                        orphan.finished_at = self.clock.now()
+                        self.store.save_attempt(orphan)
+                    self.store.update_run(current)
+                    event = self.events.make(
+                        EventType.RUN_PAUSED,
+                        run.run_id,
+                        payload={"reason": "orphan_process_active"},
+                    )
+                    self.store.save_event(event)
+                else:
+                    event = None
+            if event:
+                self.events.publish([event])
         _, resolved = self.definitions.read(run.run_id, run.context["workflow_definition"])
         definition = self.parse(resolved)
         graph, registry = compile_workflow(
@@ -156,8 +242,10 @@ class DeclarativeRunService:
         return current
 
     def control(self, run_id, action, *, feedback=None, mode="revise"):
-        if mode != "revise":
-            raise ConfigurationError("当前批次尚未装配会话续聊运行时；请使用 revise")
+        if mode not in {"revise", "continue_conversation"}:
+            raise ConfigurationError("恢复方式必须是 revise 或 continue_conversation")
+        if mode == "continue_conversation" and action not in {"resume", "retry"}:
+            raise ConfigurationError("continue_conversation 只适用于 resume/retry")
         event = None
         with self.store.transaction():
             run = self.store.load_run(run_id)
@@ -173,7 +261,44 @@ class DeclarativeRunService:
             if action not in allowed or run.status not in allowed[action]:
                 raise ConfigurationError(f"{run.status.value} 状态不能执行 {action}")
             point = run.context.get("pause_point")
+            if action in {"resume", "retry"}:
+                _, resolved = self.definitions.read(run_id, run.context["workflow_definition"])
+                definition = self.parse(resolved)
+                job = next((job for job in definition.jobs if job.name == run.current_step), None)
+                if mode == "continue_conversation":
+                    if (point or {}).get("reason") == "recovery_requires_review":
+                        raise ConfigurationError("中断会话未通过恢复身份校验；请使用 revise")
+                    if (
+                        job is None
+                        or job.type != "agent"
+                        or not getattr(
+                            self.executors.resolve_agent(job.agent), "supports_resume", False
+                        )
+                    ):
+                        raise ConfigurationError("当前节点没有可续聊的 agent 会话运行时")
+                    candidates = [
+                        a for a in self.store.list_attempts(run_id) if a.step_name == job.name
+                    ]
+                    attempt = candidates[-1] if candidates else None
+                    session = (point or {}).get("session_id") or (
+                        attempt.metadata.get("session_id") if attempt else None
+                    )
+                    engine = attempt.metadata.get("engine") if attempt else None
+                    if not session or engine != getattr(
+                        self.executors.resolve_agent(job.agent), "engine", job.agent
+                    ):
+                        raise ConfigurationError("当前节点缺少匹配的 session；请使用 revise")
+                    run.context["agent_resume"] = {
+                        "job": job.name,
+                        "session_id": session,
+                        "engine": engine,
+                        "mode": mode,
+                    }
+                else:
+                    run.context.pop("agent_resume", None)
             if action in {"resume", "retry", "skip"}:
+                if self._live_process(run_id) is not None:
+                    raise ConcurrencyConflict("历史 agent 进程组仍存活，禁止启动另一执行")
                 if run.lease_owner and (run.lease_expires_at or 0) > self.clock.now():
                     raise ConcurrencyConflict("当前原子动作仍持有租约，请等待安全边界")
                 if action == "skip":

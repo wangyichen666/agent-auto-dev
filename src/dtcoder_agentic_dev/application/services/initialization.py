@@ -96,7 +96,15 @@ def initialize(
             Path(config.prompts.directory) / f"{name}.txt",
             resource.joinpath(f"{name}.txt").read_text(encoding="utf-8"),
         )
-        for name in ("requirements", "coding", "code_review", "fix_loop", "pr_create")
+        for name in (
+            "requirements",
+            "coding",
+            "code_review",
+            "fix_loop",
+            "pr_create",
+            "agent_zh",
+            "agent_en",
+        )
     ]
     templates += [
         (Path(config.notification.templates_directory) / f"{name}.txt", text)

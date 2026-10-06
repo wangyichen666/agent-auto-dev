@@ -1,12 +1,12 @@
 # DTCoder Agentic Dev
 
-`dtcoder-agentic-dev` 是 Python 3.10+ 的可恢复研发工作流：从 Issue 建立隔离运行，驱动 Codex 生成需求、实现和评审，处理 Blocker，等待流水线并创建 PR。SQLite 保留全部运行历史，不以一个 Issue 状态承载全部执行状态。
+`dtcoder-agentic-dev` 是 Python 3.10+ 的可恢复研发工作流：从 Issue 建立隔离运行，驱动 Claude Code 或 Codex 生成需求、实现和评审，处理 Blocker，等待流水线并创建 PR。SQLite 保留全部运行历史，不以一个 Issue 状态承载全部执行状态。
 
 > **工作区由系统管理，可能执行 `git reset --hard` 和 `git clean -fd`。不要把人工未提交代码放入代理工作区。** 失败运行默认保留现场，只有显式 `cleanup` 才清理。当前恢复策略保留工作树内容，不无条件重置。
 
 ## 当前能力与外部接入
 
-项目已实现工作流内核、默认产品步骤、SQLite、租约、命令执行、Git/worktree、Codex CLI 适配器、模板、事件、前台调度和全部 CLI 命令。
+项目已实现工作流内核、默认产品步骤、SQLite、租约、命令执行、Git/worktree、Claude CLI/可选 SDK、Codex CLI 适配器、异步模型运行时、模板、事件、前台调度和全部 CLI 命令。
 
 内置 `AntCodeAdapter`、`ACIAdapter` 和 `DingTalkNotifier`，通过 code_host/pipeline/notification 的 adapter 配置在组合根装配。保留 `LoggingCodeHostAdapter`、`DisabledPipelineAdapter` 与 `NullNotifier` 的纯离线默认配置。未配置或 CLI 不支持所需远端查询/幂等能力时明确失败，不伪造外部成功。
 
@@ -26,7 +26,7 @@ dtcoder-agentic-dev --config ./runtime/config.yaml init
 dtcoder-agentic-dev --config ./runtime/config.yaml doctor
 ```
 
-`init` 创建配置、SQLite schema、五个 Prompt 模板、十三个评论模板和两个 YAML 工作流模板，以及镜像、工作区及日志目录；重复执行保留用户修改的配置和模板。帮助命令不要求事先初始化。配置无效会输出中文错误，不显示堆栈。
+`init` 创建配置、SQLite schema、七个 Prompt 模板、十三个评论模板和两个 YAML 工作流模板，以及镜像、工作区及日志目录；重复执行保留用户修改的配置和模板。帮助命令不要求事先初始化。配置无效会输出中文错误，不显示堆栈。
 
 默认目录：
 
@@ -163,8 +163,8 @@ repositories:
 | `process --repo sample --issue 123` | 显式新建并执行一个周期；演练仅入队 |
 | `list [--all] [--repo sample]` | 默认展示活动运行；`--all` 包含历史记录 |
 | `show --run ID` | 运行、步骤尝试、产物及外部操作 |
-| `pause --run ID` / `resume --run ID` | 合法状态控制，当前原子步骤自然完成 |
-| `cancel --run ID` | 取消并保留现场，不强制杀死正在执行的步骤 |
+| `pause --run ID` / `resume --run ID` | 持久化控制；受管 agent 协作停止，YAML 支持反馈与会话续聊 |
+| `cancel --run ID` | 持久化取消；回收该任务拥有的 agent 进程，保留现场 |
 | `retry --run ID` | 终止运行的新一轮执行，旧记录不删除 |
 | `cleanup --run ID` | 只清理该运行工作区，拒绝活动状态和有效租约 |
 | `start` / `status` / `stop` / `restart` / `logs` | POSIX 后台进程、身份校验、优雅停止和日志跟随 |
@@ -209,7 +209,7 @@ dtcoder-agentic-dev rollback --help
 python -m build
 ```
 
-测试通过 autouse 防护拒绝真实网络、真实 Codex 和 Git commit/push/merge/rebase。默认步骤完整链路使用文件产物、SQLite 和测试替身。Git 提交/推送只验证参数数组；真实 worktree 使用 Git 2.42+ 的 orphan 功能，无需创建提交。旧 Git 会跳过这一项，可设置 `DTCODER_TEST_GIT=/path/to/new/git pytest -q` 完整验证；产品常规有提交仓库的 worktree 不依赖 orphan。
+测试通过 autouse 防护拒绝真实网络、真实 Claude/Codex 和 Git commit/push/merge/rebase。默认步骤完整链路使用文件产物、SQLite 和测试替身。Git 提交/推送只验证参数数组；真实 worktree 使用 Git 2.42+ 的 orphan 功能，无需创建提交。旧 Git 会跳过这一项，可设置 `DTCODER_TEST_GIT=/path/to/new/git pytest -q` 完整验证；产品常规有提交仓库的 worktree 不依赖 orphan。
 
 本地开发环境如已安装依赖，可加 `--no-build-isolation --no-index` 离线验证可编辑安装。本次开发的实际验收记录见 [docs/verification.md](docs/verification.md)。
 
@@ -239,6 +239,48 @@ agent-auto-dev --config ./runtime/config.yaml submit \
 agent-auto-dev --config ./runtime/config.yaml submit --task '整理项目运维流程'
 ```
 
-init 安装用户模板且保留已有副本。默认 document.yaml 的 agent 路由到 Codex；当前批次尚未接入 Claude CLI/SDK、异步取消/session resume、多仓、HTTP 服务、面板及备份服务。原 Issue 工作流、重跑/回退和外部适配器保持兼容。命令工具默认关闭，不会因为解析模板而执行外部命令。
+init 安装用户模板且保留已有副本。新初始化 document.yaml 的 agent 默认路由到 Claude CLI，旧配置继续 Codex；已接入 Claude CLI/SDK、异步取消和 session resume，多仓、HTTP 服务、面板及备份服务仍为后续批次。原 Issue 工作流、重跑/回退和外部适配器保持兼容。命令工具默认关闭，不会因为解析模板而执行外部命令。
 
 完整可用能力、YAML 格式、持久化兼容性、操作说明与具体边界见 [声明式工作流](docs/workflows.md) 和 [应用服务边界](docs/api.md)。
+
+
+## 多执行器运行时（第二批）
+
+新初始化使用 `agents.default_engine: claude-cli`，认证沿用 `claude auth login` 的登录态。无需填写认证值。已有配置未声明 agents 时继续使用 Codex，并记录迁移提示；`init` 不覆盖用户配置。显式设置 `codex-cli` 可继续使用原引擎。
+
+```yaml
+agents:
+  default_engine: claude-cli
+  model_routes: {} # 精确模型名到引擎的映射
+  max_concurrency: 4
+claude:
+  binary: claude
+  model: ''
+  output_format: stream-json
+  max_turns: 20
+  allowed_tools: [Read, Write, Edit]
+  permission_mode: acceptEdits
+  timeout: 1800
+  sdk_fallback: false
+```
+
+YAML agent 可选 `default`、`claude`/`claude-cli`、`claude-sdk`、`codex`/`codex-cli`。default 按配置和精确模型路由选择；未知名称拒绝。提交时把实际引擎、已配置默认模型和中英文 Prompt 模板写入 resolved 快照，恢复不重新选择。节点 model 优先。可选 SDK 使用 `pip install ".[claude]"`；只有 SDK 无法导入且显式开启 sdk_fallback 时才回退 CLI，记录实际引擎，执行失败不回退。
+
+```bash
+agent-auto-dev --config ./runtime/config.yaml submit --task '整理项目接口和运维说明'
+agent-auto-dev --config ./runtime/config.yaml pause --run RUN_ID
+agent-auto-dev --config ./runtime/config.yaml resume --run RUN_ID --mode continue_conversation --feedback '补充失败处理流程'
+agent-auto-dev --config ./runtime/config.yaml run-once
+# 续聊遇到临时失败时保留会话重试；使用 revise 则开始新尝试：
+agent-auto-dev --config ./runtime/config.yaml retry --run RUN_ID --mode continue_conversation
+```
+
+manager 提供异步提交、瞬时状态查询、取消、超时与停止回收；SQLite attempt、租约和执行锁仍是事实源。CLI 模型进程以独立进程组运行，取消只回收拥有的进程组。流式 session 和进程归属在当前 attempt 中持久化；旧进程组仍存在时恢复暂停，禁止启动第二个 writer。同步注入的替身/第三方 Port 需要遵守协作取消契约，否则只能等待其原子动作完成。
+
+Claude SDK 支持流式首次调用、session resume、超时和取消，但 SDK 公共接口尚未提供可验证的进程归属证明，因此中断 SDK attempt 不自动恢复，进入人工 revise。CLI 中断只在 session、引擎、冻结定义均匹配且旧进程组已退出时自动续跑。缺失/丢失会话不会静默新建；失败不覆盖旧成功事实或清除反馈。
+
+本批尚未实现结构化 handoff、reset、多仓提交/回退、HTTP API、React 面板、资源水位、备份与定时清理。旧 Issue 工作流继续兼容，仍待后续迁移为 YAML。完整运行边界见 [工作流文档](docs/workflows.md)。
+
+## 使用本地 Claude Code 做真实验收
+
+已在本地 CLI 2.1.63 上验证首次任务、submit CLI、暂停/同 session 续聊、取消和启动阶段超时。运行事件上报的实际模型为 deepseek-v4-flash。可运行 `.venv/bin/python scripts/e2e_claude.py --case basic` 复现；该命令会产生真实模型用量，验收工作区和脱敏日志保留在打印的临时目录中。普通 pytest 仍禁止真实模型访问。其他用例和验证边界见 [本地端到端验收](docs/claude-e2e.md)。

@@ -26,3 +26,24 @@
 | 多仓/reset/handoff/API/前端/备份 | 未实施 | docs/workflows.md 的明确边界 |
 
 快照保存现在在租约校验事务内，防止过期 worker 覆盖恢复状态。恢复和控制仍依赖既有文件锁/heartbeat；未引入内存状态作为唯一事实源。文件与数据库不宣称跨资源原子事务：提交失败可能留下未引用定义目录，自动清理留待后续。
+
+## 第二批阅读证据
+- 当前工作区干净，第一批代码与文档已存在；测试重新运行 291 passed、1 skipped。
+- AgentExecutorPort 只有同步 execute，无 session 输入；CodexAdapter 提取 session 但不支持 resume。
+- 默认注册 default/codex 到同一 executor；没有 Claude 模块。
+- DeclarativeRunService.control 显式拒绝 continue_conversation；pause/cancel 仅阻止后续节点。
+- WorkflowRunner 在外部调用前保存 RUNNING attempt，并复用 SQLite CAS、跨进程执行锁和 heartbeat，可用来作为异步运行事实源。
+- 新批次沿用原状态表/payload，避免新增孤立的内存任务状态。旧配置无 agents 节时保留 Codex 路由；新初始化示例采用 Claude。
+
+## 第二批实现证据
+- Claude CLI/SDK、GenericCLI、AgentRouter、AgentManager 与 ManagedAgentExecutor 已接入真实 Dispatcher，执行事实仍存 SQLite attempt。
+- 新初始化 Claude；旧配置无 agents 继续 Codex并告警；resolved 定义固定引擎、已配置模型与双语模板。
+- pause/cancel 协作停止受管 agent；session/进程组事件持久化，续聊失败保留历史和反馈；过期事件拒绝写入。
+- CLI 自动恢复要求 session/引擎/冻结定义匹配且旧进程组退出。孤儿组存活则暂停，禁止人工操作启动另一 writer。
+- SDK 公共接口没有可验证 PID，因此中断 SDK attempt 自动恢复保守暂停；正常 SDK 首次/流式/resume/取消/超时已实现和 mock 验证。
+- 通用 CLI 的第三方同步 Port 必须协作取消；未合作时只能自然完成，不提前释放租约。
+
+## 本地 Claude Code 真实验收证据
+- 本地 CLI 2.1.63 与现有登录态可用；真实事件上报 deepseek-v4-flash，不能据此宣称 Anthropic 原生模型服务验证通过。
+- 真实首次任务、Click submit、暂停后的同 session 续聊、取消、启动阶段超时均通过，现场留在独立临时目录。
+- 本轮无需修改产品运行时代码；新增显式验收脚本、离线脚本检查和结果文档。SDK 未安装，真实 SDK 验收仍未执行。

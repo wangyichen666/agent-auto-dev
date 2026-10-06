@@ -70,3 +70,23 @@ AntCode/ACI 内部 CLI 的真实命令版本、完整查询、登录接口和服
 包内分发原有配置与两份新 YAML 模板。安装后验收使用临时目录中的 wheel 副本执行 init → workflow validate → submit local-files，并核验真实产物、双命令入口、模板资源与无 .git 工作区。仓库没有前端，因此没有前端安装、类型检查、测试或构建项。
 
 这是一批可用的 YAML/CLI 闭环，不是整个平台完成：Claude CLI/SDK 与异步运行时、session resume、handoff、多仓、reset、HTTP API、面板与自动备份/清理仍未实施。详见 [workflows.md](workflows.md)。
+
+## 第二批验收（2026-10-06）
+
+- 起始工作区干净；原基线 291 passed、1 skipped。
+- 新增 39 个行为测试，最终 pytest -q：330 passed、1 skipped。
+- 覆盖 Claude CLI/SDK 首次/流式/resume、错误终态、会话丢失、取消/超时、显式回退、命令数组、进程组隔离、持久化反馈、stale writer、SQLite 重开、CLI 恢复/孤儿保护、引擎/模型/双语模板冻结。
+- compileall、ruff check、ruff format --check、git diff --check 均通过。
+- agent-auto-dev 与 dtcoder-agentic-dev 的总帮助和 doctor/process/rollback 帮助均通过。
+- python -m build 隔离构建 wheel/sdist 成功；发现并修复 package-data 资源声明错误后，重新构建并以 --no-deps --no-index 安装到临时目录，独立导入、新默认配置、双语模板、init/validate/submit 离线文件任务闭环通过。
+- 唯一跳过仍为系统 Git 2.39.5 不支持 orphan worktree 测试；未修改用户源仓库、调用真实模型或访问业务网络。
+- 当前仓库没有前端工程/锁文件，因此本批没有前端安装、测试或生产构建。
+- SDK 契约使用注入替身验证，未做真实服务调用。中断 SDK 的自动恢复因缺少公开进程归属证明保持人工暂停；结构化 handoff、多仓、HTTP/面板、备份和资源限制仍未实现。
+
+## 本地 Claude Code 真实验收（2026-10-06）
+
+用户授权后，已使用本地 Claude Code 2.1.63 与现有登录态验证无仓首次任务、submit CLI、暂停后的同 session 续聊、取消及启动阶段超时。运行事件实际上报模型 deepseek-v4-flash。每个用例使用独立临时目录、SQLite 和真实文件产物；测试现场保留。
+
+scripts/e2e_claude.py 为显式真实模型入口，普通 pytest 保持离线；新增两个脚本分支测试防止成功用例错误使用超时断言，以及非空目录保护测试。全量回归为 **333 passed、1 skipped**。详情与复现方式见 [claude-e2e.md](claude-e2e.md)。SDK 未安装，未执行真实 SDK 测试。
+
+compileall、Ruff 检查及格式、git diff --check、验收脚本帮助均通过；wheel/sdist 隔离构建成功，确认源码包分发验收脚本与文档。

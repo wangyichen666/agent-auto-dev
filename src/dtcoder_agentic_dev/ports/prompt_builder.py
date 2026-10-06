@@ -1,0 +1,6 @@
+from typing import Protocol
+
+
+class PromptBuilder(Protocol):
+    def freeze(self, language: str) -> dict: ...
+    def build(self, instructions: str, context: dict, template: dict) -> str: ...

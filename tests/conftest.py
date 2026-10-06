@@ -69,16 +69,29 @@ def forbid_real_external_services(monkeypatch):
     monkeypatch.setattr(socket.socket, "connect", deny_network)
     monkeypatch.setattr(socket.socket, "connect_ex", deny_network)
     original = subprocess.run
+    original_popen = subprocess.Popen
 
     def guarded_run(args, *positional, **kwargs):
         if isinstance(args, (list, tuple)) and args:
             binary = Path(str(args[0])).name
-            if binary == "codex":
-                raise AssertionError("测试禁止调用真实 Codex")
+            if binary in {"codex", "claude"}:
+                raise AssertionError("测试禁止调用真实模型 CLI")
             if binary == "git" and any(
                 a in {"commit", "push", "merge", "rebase"} for a in args[1:]
             ):
                 raise AssertionError("测试禁止执行 Git commit/push/merge/rebase")
         return original(args, *positional, **kwargs)
 
+    def guarded_popen(args, *positional, **kwargs):
+        if isinstance(args, (list, tuple)) and args:
+            binary = Path(str(args[0])).name
+            if binary in {"codex", "claude"}:
+                raise AssertionError("测试禁止调用真实模型 CLI")
+            if binary == "git" and any(
+                a in {"commit", "push", "merge", "rebase"} for a in args[1:]
+            ):
+                raise AssertionError("测试禁止执行 Git 写操作")
+        return original_popen(args, *positional, **kwargs)
+
     monkeypatch.setattr(subprocess, "run", guarded_run)
+    monkeypatch.setattr(subprocess, "Popen", guarded_popen)

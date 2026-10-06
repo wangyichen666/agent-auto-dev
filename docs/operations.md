@@ -147,3 +147,16 @@ systemctl --user stop dtcoder-agentic-dev.service
 备份人工流程应同时保存 state.db（SQLite 一致性备份）、workflow-definitions、logs 和任务产物；本批不提供自动对象存储备份。恢复定义摘要错误时明确失败，不能用最新模板覆盖历史记录。无仓 cleanup 校验 owner.json、终态、租约和执行锁，拒绝未知目录，定义与 SQLite 历史保留。此机制不代替后续保留期清理、备份互斥或 manifest 服务。
 
 详细任务操作与 YAML 格式见 [workflows.md](workflows.md)。
+
+
+## Claude 与模型运行时（第二批）
+
+新初始化默认 Claude CLI；安装 Claude Code 后使用其自身 auth login 完成登录。平台只调用 `--version` 和 `auth status` 诊断，不读取凭据或发模型请求。Codex 按 default_engine/model_routes 启用，未启用时 doctor 标记“未启用”；工作流显式选择的其他引擎需要运维人员确保其二进制与登录态可用。
+
+旧配置缺少 agents 时保留 Codex 并输出迁移提示；手工添加 agents.default_engine 即可迁移，init 不覆盖用户配置。包内示例与根示例一致。SDK 为可选依赖 `pip install ".[claude]"`，sdk_fallback 默认关闭；导入缺失以外的错误均不回退。CLI 参数契约依据 [Claude CLI 文档](https://code.claude.com/docs/en/cli-reference)，SDK 契约依据 [SDK Python 文档](https://code.claude.com/docs/en/agent-sdk/python)；真实服务版本/认证兼容仍应在受控环境核验。
+
+pause/cancel 写持久化状态，模型执行轮询状态/租约并回收专属进程组，其他受信任同步 Port 在安全边界完成。取消不使用 pkill、killall 或命令行模糊匹配。CLI 输出限 16 MiB；SDK 限 10,000 个事件及 16 MiB。日志原子落盘并脱敏，不归档登录态。
+
+重启后 run/run-once 继续扫描既有可领取状态；PAUSED/CANCELLED 不自动执行。持久化的历史进程组仍存活时先暂停并拒绝 resume/retry/skip，不尝试杀未知 PID。确认旧运行自然结束后再恢复。缺少 session 或 SDK 归属证明时自动续跑暂停；continue_conversation 不绕过定义/引擎检查。会话丢失应使用 revise 新建尝试，临时故障可用 retry --mode continue_conversation 复用 session。
+
+SDK 崩溃自动接管、结构化 handoff、多仓、Web 服务/面板、资源水位及备份仍未实现。当前上线范围是本机受管工作区和现有单机调度，不宣称多用户云端平台已经完成。

@@ -3,6 +3,8 @@
 from dataclasses import dataclass
 from pathlib import Path
 
+from dtcoder_agentic_dev.adapters.claude.cli import ClaudeCLIExecutor
+from dtcoder_agentic_dev.adapters.claude.sdk import ClaudeSDKExecutor
 from dtcoder_agentic_dev.adapters.code_host.antcode import AntCodeAdapter
 from dtcoder_agentic_dev.adapters.code_host.logging import LoggingCodeHostAdapter
 from dtcoder_agentic_dev.adapters.codex.adapter import CodexAdapter
@@ -12,6 +14,7 @@ from dtcoder_agentic_dev.adapters.persistence.sqlite import SQLiteRunRepository
 from dtcoder_agentic_dev.adapters.pipeline.aci import ACIAdapter
 from dtcoder_agentic_dev.adapters.pipeline.disabled import DisabledPipelineAdapter
 from dtcoder_agentic_dev.adapters.tools.local import LocalTools
+from dtcoder_agentic_dev.application.agent_runtime import AgentRouter, ManagedAgentExecutor
 from dtcoder_agentic_dev.application.services.comments import IssueCommentHandler
 from dtcoder_agentic_dev.application.services.declarative import DeclarativeRunService
 from dtcoder_agentic_dev.application.services.event_views import EventViewBuilder
@@ -40,12 +43,16 @@ from dtcoder_agentic_dev.infrastructure.git.client import GitClient
 from dtcoder_agentic_dev.infrastructure.git.workspace import GitWorktreeWorkspaceManager
 from dtcoder_agentic_dev.infrastructure.locking.file import RunExecutionGuard
 from dtcoder_agentic_dev.infrastructure.logging.setup import RunAuditHandler, configure_logging
+from dtcoder_agentic_dev.infrastructure.process.agent_manager import AgentManager
+from dtcoder_agentic_dev.infrastructure.process.cancellable import CancellableCommandRunner
 from dtcoder_agentic_dev.infrastructure.process.command import SubprocessCommandRunner
+from dtcoder_agentic_dev.infrastructure.process.ownership import process_is_alive
 from dtcoder_agentic_dev.infrastructure.process.runtime import (
     SystemClock,
     SystemSleeper,
     UUIDGenerator,
 )
+from dtcoder_agentic_dev.prompts.builder import TaskPromptBuilder
 from dtcoder_agentic_dev.prompts.renderer import StrictPromptRenderer
 from dtcoder_agentic_dev.scheduler.dispatcher import Dispatcher
 from dtcoder_agentic_dev.scheduler.poller import Poller
@@ -63,8 +70,10 @@ class Runtime:
     renderer: object
     git: object
     declarative: object
+    agents: object
 
     def close(self):
+        self.agents.stop()
         closer = getattr(self.store, "close", None)
         if closer is not None:
             closer()
@@ -95,6 +104,7 @@ def build_runtime(
         if injected is None and name not in built_in and not config.dry_run:
             raise CapabilityNotConfigured(f"适配器 {name} 尚未装配，请在产品组合根注入对应 Port")
     clock, sleeper, ids = clock or SystemClock(), sleeper or SystemSleeper(), ids or UUIDGenerator()
+    commands_injected = commands is not None
     commands = commands or SubprocessCommandRunner()
     logs = Path(config.state.directory) / "logs"
     configure_logging(str(logs), console=console_logging)
@@ -137,7 +147,19 @@ def build_runtime(
             else DisabledPipelineAdapter()
         )
     )
-    executor = agent_executor or CodexAdapter(config.codex, commands, str(logs / "runs"))
+    # 公共命令 runner 保留兼容；默认模型进程使用独立可取消 runner。
+    agent_commands = commands if commands_injected else CancellableCommandRunner()
+    manager = AgentManager(config.agents.max_concurrency)
+    codex = CodexAdapter(config.codex, agent_commands, str(logs / "runs"))
+    claude = ClaudeCLIExecutor(config.claude, agent_commands, str(logs / "runs"))
+    sdk = ClaudeSDKExecutor(config.claude, str(logs / "runs"), fallback=claude)
+    adapters = {"codex-cli": codex, "claude-cli": claude, "claude-sdk": sdk}
+    managed = {
+        name: ManagedAgentExecutor(adapter, manager, store, clock)
+        for name, adapter in adapters.items()
+    }
+    router = AgentRouter(config.agents, managed)
+    executor = agent_executor or router
     handlers = [
         notifier.notify,
         RunAuditHandler(logs),
@@ -158,10 +180,17 @@ def build_runtime(
     ):
         registry.register(step)
     services = StepServices(
-        executor, FileArtifactStore(clock, ids), clock, FileExecutionJournal(logs / "runs")
+        executor,
+        FileArtifactStore(clock, ids),
+        clock,
+        FileExecutionJournal(logs / "runs"),
+        TaskPromptBuilder(config.prompts.directory),
     )
     executors = ExecutorRegistry()
-    executors.register_agent("codex", executor)
+    for name, adapter in managed.items():
+        executors.register_agent(name, adapter)
+    executors.register_agent("codex", agent_executor or managed["codex-cli"])
+    executors.register_agent("claude", managed["claude-cli"])
     executors.register_agent("default", executor)
     LocalTools(commands, config.tools.allowed_commands).register(executors)
     declarative = DeclarativeRunService(
@@ -181,6 +210,7 @@ def build_runtime(
         head_reader=git.head_sha,
         local_workspace=LocalTaskWorkspace(config.workspace.workspaces),
         stop_requested=lambda: scheduler.stopping,
+        process_is_alive=process_is_alive,
     )
     engine = WorkflowRunner(
         store,
@@ -223,4 +253,7 @@ def build_runtime(
     scheduler = SchedulerRunner(
         Poller(config, host, runs), dispatcher, sleeper, config.scheduler.poll_interval
     )
-    return Runtime(config, store, runs, scheduler, dispatcher, commands, renderer, git, declarative)
+    manager.start()
+    return Runtime(
+        config, store, runs, scheduler, dispatcher, commands, renderer, git, declarative, manager
+    )

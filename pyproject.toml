@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 dependencies = ["click>=8.1", "PyYAML>=6", "tabulate>=0.9"]
 
 [project.optional-dependencies]
+claude = ["claude-agent-sdk>=0.1"]
 dev = ["pytest>=7", "pytest-mock>=3.10", "ruff>=0.9", "build>=1"]
 
 [project.scripts]

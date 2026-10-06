@@ -60,7 +60,7 @@ def register(app):
             "--mode",
             type=click.Choice(["revise", "continue_conversation"]),
             default="revise",
-            help="YAML 恢复方式；会话续聊尚未装配时明确拒绝。",
+            help="YAML 恢复方式；continue_conversation 要求匹配的持久化会话。",
         )
         @click.pass_context
         def command(ctx, run_id, feedback, mode):
@@ -84,9 +84,9 @@ def register(app):
         app.add_command(command)
 
     for name, text in [
-        ("pause", "暂停运行，当前原子步骤完成后停止。"),
+        ("pause", "暂停运行；受管 agent 协作停止，其他原子步骤自然完成。"),
         ("resume", "恢复已暂停运行。"),
-        ("cancel", "取消运行，保留现场。"),
+        ("cancel", "取消运行，协作停止受管 agent 并保留现场。"),
         ("retry", "旧 Issue 创建重跑记录；YAML 从失败节点恢复并保留历史。"),
         ("cleanup", "清理已终止运行的隔离工作区。"),
         ("skip", "跳过已暂停且显式允许跳过的 YAML 节点。"),

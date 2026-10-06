@@ -6,6 +6,19 @@ scheduler:
   lease_seconds: 120
   heartbeat_interval: 15
   max_nodes_per_tick: 20
+agents:
+  default_engine: claude-cli # claude-cli / claude-sdk / codex-cli；未知名称明确拒绝
+  model_routes: {} # 按模型名称精确路由，例如 {gpt-test: codex-cli}
+  max_concurrency: 4
+claude:
+  binary: claude
+  model: '' # 节点 model 优先
+  output_format: stream-json # json / stream-json；流式模式可在执行中保存 session
+  timeout: 1800
+  max_turns: 20
+  allowed_tools: [Read, Write, Edit] # 自动许可工具；不是操作系统沙箱或完整工具白名单
+  permission_mode: acceptEdits
+  sdk_fallback: false # 仅 SDK 导入不可用时可显式回退；执行失败不回退
 codex:
   binary: codex
   extra_args: []

@@ -1,6 +1,7 @@
 """严格 dataclass 配置；配置文件目录决定未指定的运行目录。"""
 
 import hashlib
+import logging
 import math
 import os
 import re
@@ -28,6 +29,25 @@ class CodexConfig:
     extra_args: list[str] = field(default_factory=list)
     output_format: str = "text"
     timeout: float = 1800
+
+
+@dataclass
+class AgentConfig:
+    default_engine: str = "claude-cli"
+    model_routes: dict[str, str] = field(default_factory=dict)
+    max_concurrency: int = 4
+
+
+@dataclass
+class ClaudeConfig:
+    binary: str = "claude"
+    model: str = ""
+    output_format: str = "json"
+    timeout: float = 1800
+    max_turns: int = 20
+    allowed_tools: list[str] = field(default_factory=lambda: ["Read", "Write", "Edit"])
+    permission_mode: str = "acceptEdits"
+    sdk_fallback: bool = False
 
 
 @dataclass
@@ -145,6 +165,8 @@ class RepoConfig:
 
 @dataclass
 class AppConfig:
+    agents: AgentConfig = field(default_factory=AgentConfig)
+    claude: ClaudeConfig = field(default_factory=ClaudeConfig)
     scheduler: SchedulerConfig = field(default_factory=SchedulerConfig)
     codex: CodexConfig = field(default_factory=CodexConfig)
     state: StateConfig = field(default_factory=StateConfig)
@@ -163,6 +185,8 @@ class AppConfig:
 
 DEFAULT_CONFIG = Path("~/.dtcoder-agentic-dev/config.yaml").expanduser()
 SECTIONS = {
+    "agents": AgentConfig,
+    "claude": ClaudeConfig,
     "scheduler": SchedulerConfig,
     "codex": CodexConfig,
     "state": StateConfig,
@@ -258,6 +282,39 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     config = AppConfig()
     for name, cls in SECTIONS.items():
         setattr(config, name, _construct(cls, data.get(name, {})))
+    if "agents" not in data:
+        config.agents.default_engine = "codex-cli"
+        logging.getLogger(__name__).warning(
+            "旧配置未声明 agents，继续使用 Codex；新配置推荐 agents.default_engine: claude-cli"
+        )
+    engines = {"claude-cli", "claude-sdk", "codex-cli"}
+    if config.agents.default_engine not in engines or any(
+        engine not in engines for engine in config.agents.model_routes.values()
+    ):
+        raise ConfigurationError("agents 引擎必须是 claude-cli、claude-sdk 或 codex-cli")
+    if config.agents.max_concurrency <= 0 or config.claude.max_turns <= 0:
+        raise ConfigurationError("模型并发数和 Claude max_turns 必须大于 0")
+    if not math.isfinite(config.claude.timeout) or config.claude.timeout <= 0:
+        raise ConfigurationError("Claude timeout 必须是有限正数")
+    if config.claude.output_format not in {"json", "stream-json"}:
+        raise ConfigurationError("Claude output_format 必须是 json 或 stream-json")
+    if config.claude.permission_mode not in {
+        "default",
+        "acceptEdits",
+        "plan",
+        "dontAsk",
+        "bypassPermissions",
+        "auto",
+    }:
+        raise ConfigurationError("Claude permission_mode 无效")
+    if (
+        not config.claude.binary.strip()
+        or any(c in config.claude.binary for c in "\x00\r\n")
+        or any(not tool.strip() or "\x00" in tool for tool in config.claude.allowed_tools)
+    ):
+        raise ConfigurationError("Claude binary 和 allowed_tools 必须是非空字符串")
+    if any(not model.strip() for model in config.agents.model_routes):
+        raise ConfigurationError("模型路由名称不能为空")
     if not isinstance(data.get("repositories", []), list):
         raise ConfigurationError("repositories 必须是列表")
     config.repositories = [_construct(RepoConfig, r) for r in data.get("repositories", [])]
@@ -437,7 +494,9 @@ def redacted_config(config: AppConfig) -> dict[str, Any]:
     data["code_host"]["profile"] = "<已隐藏>" if config.code_host.profile else ""
     for repo in data["repositories"]:
         repo["pipeline"]["params"] = {k: "<已隐藏>" for k in repo["pipeline"]["params"]}
-    return data
+    from dtcoder_agentic_dev.domain.security import redact
+
+    return redact(data)
 
 
 def validate_url(value: str) -> None:

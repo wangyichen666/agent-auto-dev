@@ -10,6 +10,7 @@ from dtcoder_agentic_dev.ports.agent_executor import AgentExecutorPort
 from dtcoder_agentic_dev.ports.artifact_store import ArtifactStore
 from dtcoder_agentic_dev.ports.clock import Clock
 from dtcoder_agentic_dev.ports.execution_journal import ExecutionJournal
+from dtcoder_agentic_dev.ports.prompt_builder import PromptBuilder
 
 
 class OutcomeType(str, Enum):
@@ -39,6 +40,7 @@ class StepServices:
     artifact_store: ArtifactStore
     clock: Clock
     execution_journal: ExecutionJournal | None = None
+    prompt_builder: PromptBuilder | None = None
 
 
 @dataclass(frozen=True)

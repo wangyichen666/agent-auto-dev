@@ -5,12 +5,18 @@ import re
 from dataclasses import asdict
 from hashlib import sha256
 
-from dtcoder_agentic_dev.domain.errors import BusinessError, ExternalCommandTimeout, TechnicalError
+from dtcoder_agentic_dev.domain.errors import (
+    AgentCancelled,
+    BusinessError,
+    ConfigurationError,
+    ExternalCommandTimeout,
+    TechnicalError,
+)
 from dtcoder_agentic_dev.domain.json import strict_json_loads
 from dtcoder_agentic_dev.domain.security import redact
 from dtcoder_agentic_dev.domain.workflow import OutcomeError, OutcomeType, StepOutcome
 from dtcoder_agentic_dev.engine.retry import RetryPolicy
-from dtcoder_agentic_dev.ports.agent_executor import AgentExecutionRequest
+from dtcoder_agentic_dev.ports.agent_executor import AgentExecutionRequest, AgentExecutionStatus
 from dtcoder_agentic_dev.ports.tool_executor import ToolRequest
 
 
@@ -40,6 +46,26 @@ class DeclarativeStep:
             if self.loop
             else 1
         )
+
+    def recovery_session(self, attempt):
+        if self.job.type != "agent" or self.job.policy.human_agent_type == "human":
+            return None
+        executor = self.executors.resolve_agent(self.job.agent)
+        engine = getattr(executor, "engine", self.job.agent)
+        if (
+            engine == "claude-sdk"
+            or not getattr(executor, "supports_resume", False)
+            or not attempt.metadata.get("session_id")
+            or attempt.metadata.get("engine") != engine
+            or attempt.input_snapshot.get("job") != redact(asdict(self.job))
+        ):
+            raise ConfigurationError("中断 agent 缺少匹配会话或冻结定义，需人工 revise")
+        return {
+            "job": self.name,
+            "session_id": attempt.metadata["session_id"],
+            "engine": engine,
+            "mode": "recovery",
+        }
 
     def input_snapshot(self, request):
         resolved_inputs = {}
@@ -106,6 +132,9 @@ class DeclarativeStep:
                     }
                 },
             )
+        resume = request.run.context.get("agent_resume", {})
+        if resume.get("job") == self.name and resume.get("engine") != snapshot["engine"]:
+            raise ConfigurationError("续聊引擎与当前节点不匹配")
         execution = {
             "engine": snapshot["engine"],
             "model": self.job.model,
@@ -115,7 +144,7 @@ class DeclarativeStep:
         if self.job.policy.human_agent_type == "human":
             execution["engine"] = "human"
         elif self.job.type == "agent":
-            prompt = self._prompt(request, snapshot)
+            prompt = self._prompt(request, snapshot, services.prompt_builder)
             result = self.executors.resolve_agent(self.job.agent).execute(
                 AgentExecutionRequest(
                     request.run.run_id,
@@ -126,10 +155,27 @@ class DeclarativeStep:
                     model=self.job.model,
                     timeout=remaining(),
                     allow_no_repo=request.repository is None,
+                    session_id=resume.get("session_id") if resume.get("job") == self.name else None,
                 )
             )
-            if result.returncode != 0:
-                raise TechnicalError(f"agent 执行失败，退出码 {result.returncode}")
+            status = getattr(result, "status", AgentExecutionStatus.SUCCEEDED)
+            if result.returncode != 0 or status is not AgentExecutionStatus.SUCCEEDED:
+                error_class = (
+                    AgentCancelled
+                    if status is AgentExecutionStatus.CANCELLED
+                    else ExternalCommandTimeout
+                    if status is AgentExecutionStatus.TIMED_OUT
+                    else TechnicalError
+                )
+                error = error_class(f"agent 执行未成功：{status.value}，退出码 {result.returncode}")
+                error.execution_metadata = {
+                    "engine": result.structured.get("engine", snapshot["engine"]),
+                    "session_id": result.structured.get("session_id"),
+                    "stdout": result.stdout,
+                    "stderr": result.stderr,
+                    "duration_seconds": result.duration_seconds,
+                }
+                raise error
             execution.update(
                 engine=result.structured.get("engine", snapshot["engine"]),
                 session_id=result.structured.get("session_id"),
@@ -204,6 +250,8 @@ class DeclarativeStep:
     ):
         all_parameters = {**request.run.context.get("parameters", {}), self.name: parameters}
         facts = {"parameters": all_parameters, "execution": execution}
+        if request.run.context.get("agent_resume", {}).get("job") == self.name:
+            facts["agent_resume"] = {}
         if self.loop and self.name == self.loop.jobs[-1]:
             rounds = {**request.run.context.get("loop_rounds", {}), self.loop.name: round_number}
             decisions = {**request.run.context.get("loop_decisions", {})}
@@ -237,7 +285,7 @@ class DeclarativeStep:
             facts["loop_decisions"] = decisions
         return StepOutcome(outcome_type, artifacts, facts)
 
-    def _prompt(self, request, snapshot):
+    def _prompt(self, request, snapshot, builder=None):
         context = {
             "task": {"title": request.issue.title, "body": request.issue.body},
             "workspace": request.workspace,
@@ -251,9 +299,17 @@ class DeclarativeStep:
                 .get(ref["job"], {})
                 for ref in self.job.inputs.values()
             },
-            "feedback": request.run.context.get("feedback", []),
+            "feedback": [
+                entry
+                for entry in request.run.context.get("feedback", [])
+                if entry.get("job") == self.name
+            ],
             "outputs": {k: asdict(o) for k, o in self.job.outputs.items()},
         }
+        if builder is not None and self.workflow.metadata.get("prompt_template"):
+            return builder.build(
+                snapshot["resolved_prompt"], context, self.workflow.metadata["prompt_template"]
+            )
         return (
             f"{snapshot['resolved_prompt']}\n\n任务上下文：\n"
             + json.dumps(context, ensure_ascii=False, indent=2)

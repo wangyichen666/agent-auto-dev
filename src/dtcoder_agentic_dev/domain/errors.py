@@ -65,3 +65,15 @@ class CapabilityNotConfigured(FatalError):
     """所需外部能力未装配。"""
 
     code = "CAPABILITY_NOT_CONFIGURED"
+
+
+class AgentCancelled(AgenticDevError):
+    """当前任务拥有的模型执行已停止。"""
+
+    code = "CANCELLED"
+
+
+class SessionLost(BusinessError):
+    """明确丢失的会话；不能静默创建新会话替代。"""
+
+    code = "SESSION_LOST"

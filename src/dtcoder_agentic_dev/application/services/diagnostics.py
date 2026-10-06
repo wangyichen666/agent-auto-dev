@@ -24,7 +24,20 @@ def diagnose(runtime):
     if not config.dry_run:
         for name, binary, enabled, login in [
             ("Git", config.git.binary, True, None),
-            ("Codex", config.codex.binary, True, ["login", "status"]),
+            (
+                "Claude Code",
+                config.claude.binary,
+                config.agents.default_engine in {"claude-cli", "claude-sdk"}
+                or any(e.startswith("claude-") for e in config.agents.model_routes.values()),
+                ["auth", "status"],
+            ),
+            (
+                "Codex",
+                config.codex.binary,
+                config.agents.default_engine == "codex-cli"
+                or "codex-cli" in config.agents.model_routes.values(),
+                ["login", "status"],
+            ),
             (
                 "AntCode",
                 config.code_host.binary,

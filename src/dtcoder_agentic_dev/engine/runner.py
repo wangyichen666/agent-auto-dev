@@ -8,8 +8,10 @@ from typing import Callable
 from uuid import NAMESPACE_URL, uuid5
 
 from dtcoder_agentic_dev.domain.errors import (
+    AgentCancelled,
     BusinessError,
     ConcurrencyConflict,
+    ConfigurationError,
     FatalError,
     TechnicalError,
 )
@@ -107,6 +109,37 @@ class WorkflowRunner:
                     attempt.error_code = "PROCESS_INTERRUPTED"
                     attempt.error_message = "先前 worker 中断，执行恢复尝试"
                     self.repository.save_attempt(attempt)
+                    recovered_step = self.registry.resolve(
+                        self.workflow.nodes[attempt.step_name].step
+                    )
+                    recover = getattr(recovered_step, "recovery_session", None)
+                    if recover:
+                        try:
+                            resume = recover(attempt)
+                        except ConfigurationError as exc:
+                            run.status = RunStatus.PAUSED
+                            run.context["pause_point"] = {
+                                "stage": recovered_step.stage,
+                                "job": attempt.step_name,
+                                "round": attempt.metadata.get("round", 1),
+                                "attempt_id": attempt.attempt_id,
+                                "reason": "recovery_requires_review",
+                                "created_at": self.services.clock.now(),
+                                "revision": run.revision,
+                                "session_id": attempt.metadata.get("session_id"),
+                                "message": str(exc),
+                            }
+                            for stage in run.context.get("stage_executions", []):
+                                if stage["execution_id"] == attempt.metadata.get(
+                                    "stage_execution_id"
+                                ):
+                                    stage.update(
+                                        status="PAUSED", finished_at=self.services.clock.now()
+                                    )
+                            pending.append(self._event(EventType.RUN_PAUSED, run))
+                        else:
+                            if resume:
+                                run.context["agent_resume"] = resume
             self.repository.update_run(run)
         self.events.publish(pending)
         for _ in range(self.max_nodes):
@@ -221,6 +254,36 @@ class WorkflowRunner:
                     outcome = step.execute(request, self.services)
                 if not isinstance(outcome, StepOutcome):
                     raise FatalError("步骤必须返回 StepOutcome")
+            except AgentCancelled as exc:
+                boundary = self.repository.load_run(run_id)
+                persisted = next(
+                    (
+                        a
+                        for a in self.repository.list_attempts(run_id)
+                        if a.attempt_id == attempt.attempt_id
+                    ),
+                    attempt,
+                )
+                execution = {
+                    **getattr(exc, "execution_metadata", {}),
+                    "session_id": persisted.metadata.get("session_id"),
+                    "engine": persisted.metadata.get(
+                        "engine", attempt.input_snapshot.get("engine")
+                    ),
+                }
+                facts = {"execution": execution}
+                paused = boundary.status is RunStatus.PAUSED
+                if paused:
+                    facts["pause_point"] = {
+                        **boundary.context.get("pause_point", {}),
+                        "session_id": execution["session_id"],
+                        "attempt_id": attempt.attempt_id,
+                    }
+                outcome = StepOutcome(
+                    OutcomeType.PAUSED if paused else OutcomeType.CANCELLED,
+                    error=OutcomeError(type(exc).__name__, str(exc), exc.code),
+                    facts=facts,
+                )
             except TechnicalError as exc:
                 technical = True
                 outcome = StepOutcome(
@@ -309,6 +372,16 @@ class WorkflowRunner:
             with self.repository.transaction():
                 self._lease(run, owner)
                 latest = self.repository.load_run(run_id)
+                persisted_attempt = next(
+                    (
+                        a
+                        for a in self.repository.list_attempts(run_id)
+                        if a.attempt_id == attempt.attempt_id
+                    ),
+                    None,
+                )
+                if persisted_attempt:
+                    attempt.metadata.update(persisted_attempt.metadata)
                 attempt.status = AttemptStatus(outcome.type.value)
                 attempt.finished_at = self.services.clock.now()
                 attempt.output = {
@@ -332,7 +405,11 @@ class WorkflowRunner:
                 if getattr(step, "stable_identity", False):
                     execution = outcome.facts.get("execution", {})
                     attempt.metadata.update(
-                        {k: execution.get(k) for k in ("engine", "model", "session_id")}
+                        {
+                            k: execution.get(k)
+                            for k in ("engine", "model", "session_id")
+                            if execution.get(k) is not None
+                        }
                     )
                 self.repository.save_attempt(attempt)
                 for artifact in outcome.artifacts:

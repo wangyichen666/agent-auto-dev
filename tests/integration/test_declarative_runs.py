@@ -645,3 +645,25 @@ def test_retry_archives_fail_point_instead_of_leaving_stale_active_pointer(tmp_p
     retried = svc.control(run.run_id, "retry")
     assert "fail_point" not in retried.context
     assert retried.context["fail_history"][0]["attempt_id"] == point["attempt_id"]
+
+
+@pytest.mark.parametrize("status", ["FAILED", "CANCELLED", "TIMED_OUT"])
+def test_injected_agent_terminal_status_is_never_success(tmp_path, clock, ids, status):
+    from dtcoder_agentic_dev.ports.agent_executor import AgentExecutionResult, AgentExecutionStatus
+
+    svc = service(tmp_path, clock, ids)
+
+    class Agent:
+        def execute(self, request):
+            return AgentExecutionResult("未完成", returncode=0, status=AgentExecutionStatus(status))
+
+    svc.executors.register_agent("default", Agent())
+    data = {
+        "name": "terminal",
+        "version": "1",
+        "stages": ["run"],
+        "jobs": {"agent": {"stage": "run", "prompt": "执行任务"}},
+    }
+    run = svc.submit(yaml.safe_dump(data), "不能伪成功")
+    result = execute(svc, run.run_id, clock)
+    assert result.status is (RunStatus.CANCELLED if status == "CANCELLED" else RunStatus.FAILED)
